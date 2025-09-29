@@ -1,6 +1,6 @@
 #!/bin/ksh
 
-printf "Parsing The Fax Server....."
+printf "Parsing The Fax Server.....\n"
 
 REQ=$1
 
@@ -21,4 +21,4 @@ DIGI_NAME=$(ps -ef | grep -- "-d/dev/$DIGI_PARENT" | grep -v grep | awk -F'-i' '
 
 DIGI_IP=$(grep -i ${DIGI_NAME} /etc/hosts | awk '{print $1}')
 
-printf "The Fax Job ${REQ} was sent via ${FAX_DEVICE} with a status of ${JOB_STATUS}. ${FAX_DEVICE} is associated with ${DIGI_NAME} on port ${DIGI_PORT}. ${DIGI_NAME}'s IP address is ${DIGI_IP}.\n"
+printf "The fax job ${REQ} was sent via ${FAX_DEVICE} with a status of ${JOB_STATUS}. ${FAX_DEVICE} is associated with ${DIGI_NAME} on port ${DIGI_PORT}. ${DIGI_NAME}'s IP address is ${DIGI_IP}.\n"
