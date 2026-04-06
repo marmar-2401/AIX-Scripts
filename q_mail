@@ -1,0 +1,37 @@
+!/usr/bin/ksh
+############################################################
+##Script Creator: Mark Pierce-Zellefrow                              
+##Date: 7/15/2025                                          
+############################################################
+# Instructions For Use (See Below)                          
+# Save this file in /usr/local/scc/bin, call it q_mail!    
+# Change permission:                                       
+# chmod 755 /usr/local/scc/bin/q_mail!   
+# crontab -e 
+# 0,20,40 * * * * /usr/local/scc/bin/q_mail!  > /dev/null 2>&1              
+############################################################
+HOST=$(hostname)
+enq -isAW | grep -v READY | grep -v RUNNING | grep @ | cut -c1-79 > /tmp/qadmUP.$$
+
+if [[ -s /tmp/qadmUP.$$ ]]; then
+echo "This message is from " ${HOST} > /tmp/mailme.txt
+echo "Queue                Dev            Status       Job Files            User" >> /tmp/mailme.txt
+cat /tmp/qadmUP.$$ >> /tmp/mailme.txt
+        cat /tmp/mailme.txt
+		    mail -s "Printer Down Report" #<Fill Email Here> < /tmp/mailme.txt
+        rm /tmp/mailme.txt
+        rm /tmp/qadmUP.$$
+else
+        print "All queues are in ready state"
+        rm /tmp/qadmUP.$$
+        exit
+fi
+
+rm /tmp/qadmUP.$$
+
+enq -isAW |grep DOWN |awk '{print "qadm -U", $1}' >/tmp/qadmUP.$$
+sh /tmp/qadmUP.$$
+rm /tmp/qadmUP.$$
+
+#Keeps the root mail from overflowing 
+> /var/spool/mail/root
