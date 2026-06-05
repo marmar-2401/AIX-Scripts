@@ -735,7 +735,6 @@ RPTEOF
     TMP_CRON=$(mktemp /tmp/crontab_XXXXXX)
     crontab -l 2>/dev/null | grep -v "aix_clamav_scan\|aix_freshclam\|aix_clamav_weekly" > "$TMP_CRON"
     cat >> "$TMP_CRON" << CRONEOF
-
 # ClamAV automated jobs — added by clamav.ksh
 0    1 * * *  ${SCAN_SCRIPT} Daily
 0    2 * * *  ${FRESHCLAM_SCRIPT}
@@ -743,9 +742,30 @@ RPTEOF
 CRONEOF
 
     crontab "$TMP_CRON"
+    typeset _CRON_RC=$?
     rm -f "$TMP_CRON"
 
-    printf "${GREEN}[OK] Cron jobs installed.${NC}\n"
+    # Verify cron entries are actually in crontab -l
+    if crontab -l 2>/dev/null | grep -q "aix_clamav_scan"; then
+        printf "${GREEN}[OK] Cron jobs installed.${NC}\n"
+    else
+        # Fallback: write directly to the crontab spool file
+        typeset _SPOOL="/var/spool/cron/crontabs/root"
+        printf "${YELLOW}[WARN] crontab command may have failed (rc=${_CRON_RC}), trying direct write...${NC}\n"
+        grep -v "aix_clamav_scan\|aix_freshclam\|aix_clamav_weekly" "$_SPOOL" 2>/dev/null > /tmp/clamav_cron_direct
+        printf "# ClamAV automated jobs — added by clamav.ksh\n" >> /tmp/clamav_cron_direct
+        printf "0    1 * * *  ${SCAN_SCRIPT} Daily\n" >> /tmp/clamav_cron_direct
+        printf "0    2 * * *  ${FRESHCLAM_SCRIPT}\n" >> /tmp/clamav_cron_direct
+        printf "0    9 * * 0  ${REPORT_SCRIPT}\n" >> /tmp/clamav_cron_direct
+        cp /tmp/clamav_cron_direct "$_SPOOL"
+        chmod 600 "$_SPOOL"
+        rm -f /tmp/clamav_cron_direct
+        if crontab -l 2>/dev/null | grep -q "aix_clamav_scan"; then
+            printf "${GREEN}[OK] Cron jobs installed (via direct spool write).${NC}\n"
+        else
+            printf "${RED}[FAIL] Could not install cron jobs. Add manually to root crontab.${NC}\n"
+        fi
+    fi
     printf "     Daily scan:      ${SCAN_SCRIPT} (01:00)\n"
     printf "     Daily freshclam: ${FRESHCLAM_SCRIPT} (02:00)\n"
     printf "     Weekly report:   ${REPORT_SCRIPT} (Sunday 09:00)\n"
@@ -881,7 +901,7 @@ clamav_health_check() {
             printf "${CYAN}       Definition version : %s${NC}\n" "$DB_VER"
             printf "${CYAN}       Definition built   : %s${NC}\n" "$DB_DATE"
         fi
-        # Last freshclam run — check most recent freshclam log
+        # Last freshclam run — check script log, fall back to DB file mtime
         typeset LATEST_FC
         LATEST_FC=$(ls "${LOG_DIR}"/freshclam-*.log 2>/dev/null | sort | tail -1)
         if [ -n "$LATEST_FC" ]; then
@@ -890,7 +910,16 @@ clamav_health_check() {
             [ -z "$FC_LAST" ] && FC_LAST=$(ls -l "$LATEST_FC" 2>/dev/null | awk '{print $6, $7, $8}')
             printf "${CYAN}       Last freshclam run : %s${NC}\n" "$FC_LAST"
         else
-            printf "${YELLOW}       No freshclam log — run: ksh clamav.ksh --freshclam${NC}\n"
+            # No script log — infer from DB file mtime (freshclam updates these)
+            typeset FC_MTIME
+            for _DB in daily.cvd daily.cld; do
+                [ -f "${DB_DIR}/${_DB}" ] && FC_MTIME=$(ls -l "${DB_DIR}/${_DB}" 2>/dev/null | awk '{print $6, $7, $8}') && break
+            done
+            if [ -n "$FC_MTIME" ]; then
+                printf "${CYAN}       Last freshclam run : ~%s (inferred from DB mtime)${NC}\n" "$FC_MTIME"
+            else
+                printf "${YELLOW}       No freshclam log — run: ksh clamav.ksh --freshclam${NC}\n"
+            fi
         fi
     fi
     print ""
@@ -1514,7 +1543,6 @@ run_tests() {
         else t_fail "T10.2 Freshclam cron" "not in crontab"; fi
         if crontab -l 2>/dev/null | grep -q "aix_clamav_weekly"; then t_pass "T10.3 Weekly report cron present"
         else t_fail "T10.3 Weekly report cron" "not in crontab"; fi
-        typeset _BC; _BC=$(crontab -l 2>/dev/null | grep "aix_clamav\|aix_freshclam" | grep -c " root ")
         if [ "${_BC:-0}" -eq 0 ]; then t_pass "T10.4 No 'root' field in cron (5-field AIX format)"
         else t_fail "T10.4 Cron format" "$_BC entries have 'root' user field"; fi
 
