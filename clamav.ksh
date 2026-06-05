@@ -1242,6 +1242,8 @@ run_manual_scan() {
 
 # ── run_tests ─────────────────────────────────────────────────────────────────
 run_tests() {
+    check_root
+    set_libpath
     typeset MODE="${1:---all}"
     typeset SELF="$0"
     typeset _PASS=0 _FAIL=0 _SKIP=0
@@ -1289,7 +1291,7 @@ run_tests() {
 
         t_section "EICAR detection"
         printf 'X5O!P%%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' > /tmp/eicar_runtests.com
-        typeset _EIRC; ksh "$SELF" --scan /tmp >/dev/null 2>&1; _EIRC=$?
+        typeset _EIRC; "$CLAMSCAN_BIN" /tmp/eicar_runtests.com >/dev/null 2>&1; _EIRC=$?
         rm -f /tmp/eicar_runtests.com
         [ "$_EIRC" -eq 1 ] && t_pass "T5.1 EICAR detected (rc=1)" || t_fail "T5.1 EICAR detected" "rc=$_EIRC want=1"
 
