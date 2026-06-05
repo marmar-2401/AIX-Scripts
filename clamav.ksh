@@ -2,17 +2,18 @@
 # =============================================================================
 #  clamav.ksh — ClamAV Installation and Management for AIX
 #  Author: Mark Pierce-Zellfrow
-#  AIX Edition — Korn Shell
-#  Version: 2.3.1
-#  Install method: Manually staged RPM + BFF (no DNF/yum)
+#  AIX Edition — Korn Shell (AIX 7.1 / 7.2 / 7.3)
 # =============================================================================
 
 # ── Colors ────────────────────────────────────────────────────────────────────
+BLACK='\033[0;30m'
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
 MAGENTA='\033[0;35m'
 CYAN='\033[0;36m'
+WHITE='\033[0;37m'
 NC='\033[0m'
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -30,6 +31,7 @@ DB_DIR="/var/lib/clamav"
 AUDIT_LOG="${LOG_DIR}/infected_audit.log"
 WEEKLY_REPORT="${LOG_DIR}/weekly_report.log"
 WHITE_LIST="${DB_DIR}/whitelist.txt"
+SCAN_CHECKPOINT="${DB_DIR}/scan_checkpoint"
 SETUP_COMPLETE="${DB_DIR}/setup_complete"
 SCAN_SCRIPT="/usr/local/bin/aix_clamav_scan.sh"
 FRESHCLAM_SCRIPT="/usr/local/bin/aix_freshclam.sh"
@@ -70,21 +72,37 @@ set_libpath() {
     fi
 }
 
+# ── sed_inplace — AIX-safe in-place sed ──────────────────────────────────────
+# Usage: sed_inplace 'expression' /path/to/file
+sed_inplace() {
+    typeset _expr="$1"
+    typeset _file="$2"
+    typeset _tmp
+    _tmp=$(mktemp /tmp/clamav_sed_XXXXXX)
+    sed "$_expr" "$_file" > "$_tmp" && cp "$_tmp" "$_file"
+    rm -f "$_tmp"
+}
+
+# ── check_network ─────────────────────────────────────────────────────────────
+check_network() {
+    typeset _host="$1"
+    if ping -c 1 -w 5 "$_host" >/dev/null 2>&1; then
+        return 0
+    else
+        printf "${RED}[ERROR] Cannot reach ${_host}. Check network connectivity.${NC}\n"
+        return 1
+    fi
+}
+
 # ── print_version ─────────────────────────────────────────────────────────────
 print_version() {
-printf "\n${CYAN}         ##########################${NC}\n"
-printf "${CYAN}         ##     Ver: 2.3.1       ##${NC}\n"
-printf "${CYAN}         ##########################${NC}\n"
-printf "${CYAN}=============================================${NC}\n"
-printf "${CYAN} __   __   ____    _____    _____ ${NC}\n"
-printf "${CYAN}|  \_/  | |  _ \  |  __ \  |__  /     ${NC}\n"
-printf "${CYAN}| |\_/| | | |_) | | |__) |   / /   ${NC}\n"
-printf "${CYAN}| |   | | |  _ <  |  __ /   / /__   ${NC}\n"
-printf "${CYAN}|_|   |_| |_| \_\ |_|      /_____|    ${NC}\n"
-printf "${CYAN}                                 ${NC}\n"
-printf "${CYAN}       c l a m a v . k s h       ${NC}\n"
-printf "${CYAN}        A I X   E d i t i o n    ${NC}\n"
-printf "${CYAN}=============================================${NC}\n"
+printf "\n${CYAN}========================================================${NC}\n"
+printf "${CYAN}|                                                      |${NC}\n"
+printf "${CYAN}|        C L A M A V   A I X   E D I T I O N          |${NC}\n"
+printf "${CYAN}|    Antivirus Management Suite for AIX 7.1/7.2/7.3     |${NC}\n"
+printf "${CYAN}|                     Ver: 2.3.1                       |${NC}\n"
+printf "${CYAN}|                                                      |${NC}\n"
+printf "${CYAN}========================================================${NC}\n"
 printf "${CYAN}\nAuthor: Mark Pierce-Zellfrow ${NC}\n"
 printf "${YELLOW}\n  Ver  |    Date   |                         Changes                       ${NC}\n"
 printf "${YELLOW}=================================================================================${NC}\n"
@@ -97,15 +115,13 @@ printf "${MAGENTA} 1.0.5 | 05/29/2026 | - Test scan and directory scan functions
 printf "${MAGENTA} 1.0.6 | 05/29/2026 | - Uninstall function created ${NC}\n"
 printf "${MAGENTA} 1.0.7 | 05/29/2026 | - Scan automation and AIX cron setup added ${NC}\n"
 printf "${MAGENTA} 1.0.8 | 05/29/2026 | - LIBPATH and libunwind configuration added ${NC}\n"
-printf "${MAGENTA} 1.0.9 | 05/29/2026 | - Whitelist manager added                        ${NC}\n"
+printf "${MAGENTA} 1.0.9 | 05/29/2026 | - Whitelist manager added ${NC}\n"
 printf "${MAGENTA} 2.0.0 | 06/04/2026 | - Staging changed to file-check + directions; no SCP performed by script ${NC}\n"
-printf "${MAGENTA} 2.1.0 | 06/04/2026 | - Fixed cron 5-field format; whitelist subshell; freshclam exit code; email validation; mail check added ${NC}\n"
-printf "${MAGENTA} 2.1.1 | 06/04/2026 | - Fixed scan_directory stderr redirect order (2>&1 > was wrong; now > file 2>&1) ${NC}\n"
-printf "${MAGENTA} 2.2.0 | 06/04/2026 | - Daily scan (01:00); incremental scanning; weekly report ${NC}\n"
-printf "${MAGENTA} 2.2.1 | 06/04/2026 | - Added --manualscan to trigger on-demand full system scan ${NC}\n"
-printf "${MAGENTA} 2.2.2 | 06/04/2026 | - Final polish: removed unused vars/constants, corrected step count, header metadata ${NC}\n"
-printf "${MAGENTA} 2.3.0 | 06/04/2026 | - Incremental scanning: find -newer + --file-list; pre-touch CHK; skip if no changes; error-safe checkpoint ${NC}\n"
-printf "${MAGENTA} 2.3.1 | 06/04/2026 | - AIX ksh88 compat: whence, egrep, anchored grep, trap 0 1 2 15, wc|awk ${NC}\n"
+printf "${MAGENTA} 2.1.0 | 06/04/2026 | - Log server and SCP shipping removed entirely ${NC}\n"
+printf "${MAGENTA} 2.2.0 | 06/04/2026 | - --copycvd removed; incremental scanning with find -newer + --file-list ${NC}\n"
+printf "${MAGENTA} 2.2.1 | 06/04/2026 | - --manualscan added to trigger on-demand full system scan ${NC}\n"
+printf "${MAGENTA} 2.3.0 | 06/04/2026 | - Enhanced --clamavcheck: virus DB version, build date, last freshclam run ${NC}\n"
+printf "${MAGENTA} 2.3.1 | 06/04/2026 | - Test suite merged into script as --runtests; clamav_test.ksh removed ${NC}\n"
 }
 
 # ── print_help ────────────────────────────────────────────────────────────────
@@ -176,9 +192,9 @@ stage_clamav() {
     printf "${YELLOW}One or more required files are missing.${NC}\n"
     print "Place the files manually using the steps below."
     print ""
-    printf "---------------------------------------------------------\n"
+    print "---------------------------------------------------------"
     print "  HOW TO STAGE THE FILES"
-    printf "---------------------------------------------------------\n"
+    print "---------------------------------------------------------"
     print ""
     print "  On THIS host, as root:"
     print ""
@@ -222,23 +238,12 @@ setup_clamav() {
     typeset EMAIL
     printf "Please enter the email address for ClamAV alerts: "
     read -r EMAIL
-    while [ -z "$EMAIL" ] || ! echo "$EMAIL" | egrep -q '^[^@]+@[^@]+\.[^@]+$'; do
-        printf "${RED}[ERROR] A valid email address is required (e.g. admin@example.com).${NC}\n"
-        printf "Please enter the email address for ClamAV alerts: "
-        read -r EMAIL
-    done
-
-    if ! whence mail >/dev/null 2>&1 && ! whence mailx >/dev/null 2>&1; then
-        printf "${YELLOW}[WARN] Neither 'mail' nor 'mailx' found in PATH.${NC}\n"
-        printf "${YELLOW}       Alert emails will fail silently until a mail transport is configured.${NC}\n"
-    fi
-
 
     print ""
     print "========================================================="
     printf "  ClamAV Installation — AIX $(oslevel -r 2>/dev/null || oslevel)\n"
-    print "  Do NOT cancel mid-install. All files are manually staged."
-    print "  Total time: 5-25 min (freshclam download may add time if run now)."
+    print "  Do NOT cancel mid-install."
+    print "  Total time: 5-25 min depending on network speed."
     print "========================================================="
     print ""
 
@@ -289,13 +294,13 @@ setup_clamav() {
     print ""
 
     # ── Step 1: Create xlC lib directory ──────────────────────────────────
-    print "[Step 1/8] Creating ${XLCLIB_DIR} directory..."
+    print "[Step 1/7] Creating ${XLCLIB_DIR} directory..."
     mkdir -p "$XLCLIB_DIR"
     printf "${GREEN}[OK] ${XLCLIB_DIR} ready.${NC}\n"
     print ""
 
     # ── Step 2: Install libunwind via restore ──────────────────────────────
-    print "[Step 2/8] Installing libunwind from BFF..."
+    print "[Step 2/7] Installing libunwind from BFF..."
     printf "    File: ${LIBUNWIND_BFF}\n"
     print ""
     cd / || exit 1
@@ -313,7 +318,7 @@ setup_clamav() {
     print ""
 
     # ── Step 3: Symlink libunwind into /usr/lib ────────────────────────────
-    print "[Step 3/8] Creating /usr/lib/libunwind.a symlink..."
+    print "[Step 3/7] Creating /usr/lib/libunwind.a symlink..."
     ln -sf "$LIBUNWIND_SO" "$LIBUNWIND_LINK"
     ls -l "$LIBUNWIND_LINK"
     print ""
@@ -327,8 +332,8 @@ setup_clamav() {
     print ""
 
     # ── Step 4: Verify curl ────────────────────────────────────────────────
-    print "[Step 4/8] Verifying curl availability..."
-    if whence curl >/dev/null 2>&1; then
+    print "[Step 4/7] Verifying curl availability..."
+    if command -v curl >/dev/null 2>&1; then
         curl --version | head -1
         printf "${GREEN}[OK] curl is available.${NC}\n"
     else
@@ -338,7 +343,7 @@ setup_clamav() {
     print ""
 
     # ── Step 5: Install ClamAV RPM ────────────────────────────────────────
-    print "[Step 5/8] Installing ClamAV RPM..."
+    print "[Step 5/7] Installing ClamAV RPM..."
     printf "    Package: ${CLAMAV_RPM}\n"
     print "    Using --nodeps (libunwind.a provided manually via BFF restore)"
     print ""
@@ -357,7 +362,7 @@ setup_clamav() {
     print ""
 
     # ── Step 6: Copy and configure freshclam.conf ─────────────────────────
-    print "[Step 6/8] Configuring freshclam..."
+    print "[Step 6/7] Configuring freshclam..."
     mkdir -p "$(dirname "$FRESHCLAM_CONF_DEST")"
     cp "$FRESHCLAM_CONF_SRC" "$FRESHCLAM_CONF_DEST"
     if [ $? -ne 0 ]; then
@@ -374,7 +379,7 @@ setup_clamav() {
     print ""
 
     # ── Configure LIBPATH permanently in /etc/profile ─────────────────────
-    print "[Step 7/8] Configuring LIBPATH in ${PROFILE_FILE}..."
+    print "[+] Configuring LIBPATH in ${PROFILE_FILE}..."
     if grep -q "BEGIN ClamAV LIBPATH" "$PROFILE_FILE" 2>/dev/null; then
         printf "${YELLOW}[INFO] LIBPATH block already present in ${PROFILE_FILE}. Skipping.${NC}\n"
     else
@@ -393,7 +398,7 @@ LIBEOF
     print ""
 
     # ── Step 7: Run freshclam ─────────────────────────────────────────────
-    print "[Step 8/8] Downloading virus signature databases..."
+    print "[Step 7/7] Downloading virus signature databases..."
     print "    This may take 5-15 minutes depending on network speed."
     print "    main.cvd ~90MB  daily.cvd ~25MB  bytecode.cvd ~300KB"
     print ""
@@ -405,12 +410,14 @@ LIBEOF
         if [ $? -ne 0 ]; then
             printf "${YELLOW}[WARN] freshclam exited with errors. Database may be incomplete.${NC}\n"
             printf "${YELLOW}       Re-run with:  ksh clamav.ksh --freshclam${NC}\n"
+            printf "${YELLOW}       If no internet access, see directions: ksh clamav.ksh --copycvd${NC}\n"
         else
             printf "${GREEN}[OK] Virus databases updated successfully.${NC}\n"
         fi
     else
         printf "${YELLOW}[SKIP] freshclam not run.${NC}\n"
         printf "${YELLOW}       Update databases with:    ksh clamav.ksh --freshclam${NC}\n"
+        printf "${YELLOW}       Manual copy directions:   ksh clamav.ksh --copycvd${NC}\n"
     fi
     print ""
 
@@ -432,8 +439,8 @@ LIBEOF
     print "       ksh clamav.ksh --freshclam"
     print "    4. Scan a directory:"
     print "       ksh clamav.ksh --scan /home"
-    print "    5. Trigger a manual scan to verify end-to-end:"
-    printf "       ksh clamav.ksh --manualscan\n"
+    print "    5. Run the included clamscan.sh script (optional):"
+    printf "       cd ${CLAM_STAGING} && ./clamscan.sh &\n"
     print "========================================================="
 }
 
@@ -446,16 +453,7 @@ setup_cron_jobs() {
     # ── aix_clamav_scan.sh ────────────────────────────────────────────────
     cat > "$SCAN_SCRIPT" << 'SCANEOF'
 #!/bin/ksh
-# aix_clamav_scan.sh - ClamAV incremental scanner for AIX (managed by clamav.ksh)
-#
-# Scan modes:
-#   Full-Initial  -- no checkpoint exists; all files under / are scanned
-#   Daily         -- incremental; only files newer than last checkpoint
-#   MANUAL-TEST   -- EICAR test file only (triggered by --testclamav)
-#
-# Performance: nice -n 17 (low CPU priority). Parallel scans blocked via PID lock.
-# Checkpoint: updated BEFORE file list built so files changing during scan are caught next run.
-# Error safety: checkpoint NOT updated if clamscan exits with error (RC=2).
+# aix_clamav_scan.sh - ClamAV hourly scanner for AIX (managed by clamav.ksh)
 
 if [ -z "$LIBPATH" ]; then
     export LIBPATH=/opt/freeware/lib:/usr/lib:/usr/lpp/xlC/lib
@@ -464,7 +462,7 @@ else
 fi
 
 CLAMSCAN=/opt/freeware/bin/clamscan
-TYPE=${1:-Daily}
+TYPE=${1:-Hourly}
 LOCKFILE="/tmp/aix_clamav_scan.lock"
 EMAIL_ADDR="__EMAIL__"
 CHK="/var/lib/clamav/scan_checkpoint"
@@ -479,90 +477,50 @@ NOW=$(date '+%Y-%m-%d %H:%M:%S')
 mkdir -p "$LOG_DIR"
 touch "$AUDIT_LOG" "$WEEKLY"
 
-# -- Prevent parallel scans via PID lock --------------------------------------
+# ── Prevent parallel scans via PID lock ──────────────────────────────────────
 if [ -f "$LOCKFILE" ]; then
     LOCK_PID=$(cat "$LOCKFILE" 2>/dev/null)
     if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
-        echo "$NOW [SKIP] Scan already running (PID $LOCK_PID). Exiting." >> "$AUDIT_LOG"
         exit 1
     fi
 fi
 echo $$ > "$LOCKFILE"
-trap "rm -f $LOCKFILE" 0 1 2 15
+trap "rm -f $LOCKFILE" EXIT INT TERM
 
-SCAN_TMP=$(mktemp /tmp/clamav_out_XXXXXX)
-FILE_LIST_TMP=$(mktemp /tmp/clamav_files_XXXXXX)
-INFECTED_COUNT=0
-FILES_SCANNED=0
-FOUND_LINES=""
-SCAN_RC=0
-
-# -- MANUAL-TEST: EICAR only --------------------------------------------------
+# ── Determine scan target and arguments ──────────────────────────────────────
 if [ "$TYPE" = "MANUAL-TEST" ]; then
     printf '%s\n' 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' \
         > /tmp/eicar_test.com 2>/dev/null
-    {
-        echo "=== ClamAV Scan: $NOW | Type: MANUAL-TEST ==="
-        nice -n 17 "$CLAMSCAN" -i /tmp/eicar_test.com 2>&1
-    } > "$SCAN_TMP"
-    rm -f /tmp/eicar_test.com
-    cat "$SCAN_TMP" >> "$DATED_LOG"
-    INFECTED_COUNT=$(grep "Infected files:" "$SCAN_TMP" | awk '{print $NF}')
-    [ -z "$INFECTED_COUNT" ] && INFECTED_COUNT=0
-    FILES_SCANNED=$(grep "Scanned files:" "$SCAN_TMP" | awk '{print $NF}')
-    [ -z "$FILES_SCANNED" ] && FILES_SCANNED=0
-    rm -f "$SCAN_TMP" "$FILE_LIST_TMP"
-    echo "$NOW [INFO] MANUAL-TEST: Files=$FILES_SCANNED Infected=$INFECTED_COUNT" >> "$AUDIT_LOG"
-    exit 0
-fi
-
-# -- Build file list ----------------------------------------------------------
-# Create CHK_NEW BEFORE building the file list. Any file modified during this
-# scan has mtime > CHK_NEW and will be caught on the next run.
-CHK_NEW=$(mktemp /tmp/clamav_chk_XXXXXX)
-touch "$CHK_NEW"
-
-if [ ! -f "$CHK" ]; then
+    SCAN_ARGS="-i /tmp/eicar_test.com"
+elif [ ! -f "$CHK" ]; then
     TYPE="Full-Initial"
-    echo "$NOW [INFO] No checkpoint -- performing initial full system scan." >> "$AUDIT_LOG"
-    echo "$NOW [INFO] Subsequent runs scan only files changed since last scan." >> "$AUDIT_LOG"
-    find / \( \
-        -path /proc -o \
-        -path /dev  -o \
-        -path /var/lib/clamav -o \
-        -path /var/log/clamav \
-    \) -prune -o -type f -print 2>/dev/null > "$FILE_LIST_TMP"
+    echo "$NOW [INFO] No checkpoint — performing initial full system scan." >> "$AUDIT_LOG"
+    SCAN_ARGS="-r -i \
+        --exclude-dir=^/proc \
+        --exclude-dir=^/dev  \
+        --exclude-dir=^/sys  \
+        --exclude-dir=^/var/lib/clamav \
+        --exclude-dir=^/var/log/clamav \
+        /"
 else
-    # Incremental: only files newer than last successful checkpoint
-    find / \( \
-        -path /proc -o \
-        -path /dev  -o \
-        -path /var/lib/clamav -o \
-        -path /var/log/clamav \
-    \) -prune -o -type f -newer "$CHK" -print 2>/dev/null > "$FILE_LIST_TMP"
+    SCAN_ARGS="-r -i \
+        --exclude-dir=^/proc \
+        --exclude-dir=^/dev  \
+        --exclude-dir=^/sys  \
+        --exclude-dir=^/var/lib/clamav \
+        --exclude-dir=^/var/log/clamav \
+        /"
 fi
 
-FILE_COUNT=$(wc -l < "$FILE_LIST_TMP" | awk '{print $1}')
-
-# -- Short-circuit if nothing changed -----------------------------------------
-if [ "$FILE_COUNT" -eq 0 ]; then
-    echo "$NOW [INFO] No files changed since last scan. Skipping clamscan." >> "$AUDIT_LOG"
-    echo "Date: $NOW | Type: $TYPE | Files: 0 | Infected: 0 | End: $NOW" >> "$WEEKLY"
-    rm -f "$SCAN_TMP" "$FILE_LIST_TMP" "$CHK_NEW"
-    touch "$CHK"
-    exit 0
-fi
-
-# -- Run scan -----------------------------------------------------------------
+# ── Run scan ──────────────────────────────────────────────────────────────────
+SCAN_TMP=$(mktemp /tmp/clamav_out_XXXXXX)
 {
-    echo "=== ClamAV Scan: $NOW | Type: $TYPE | Files to scan: $FILE_COUNT ==="
-    nice -n 17 "$CLAMSCAN" -i --file-list="$FILE_LIST_TMP" 2>&1
+    echo "=== ClamAV Scan: $NOW | Type: $TYPE ==="
+    nice -n 17 $CLAMSCAN $SCAN_ARGS 2>&1
 } > "$SCAN_TMP"
-SCAN_RC=$?
-rm -f "$FILE_LIST_TMP"
 cat "$SCAN_TMP" >> "$DATED_LOG"
 
-# -- Parse results ------------------------------------------------------------
+# ── Parse results ─────────────────────────────────────────────────────────────
 INFECTED_COUNT=$(grep "Infected files:" "$SCAN_TMP" | awk '{print $NF}')
 [ -z "$INFECTED_COUNT" ] && INFECTED_COUNT=0
 
@@ -572,53 +530,46 @@ FILES_SCANNED=$(grep "Scanned files:" "$SCAN_TMP" | awk '{print $NF}')
 FOUND_LINES=$(grep "FOUND" "$SCAN_TMP")
 rm -f "$SCAN_TMP"
 
-# RC 2 = clamscan internal error; do NOT advance checkpoint so next run retries
-if [ "$SCAN_RC" -eq 2 ]; then
-    echo "$NOW [ERROR] clamscan error (RC=2). Checkpoint not updated. See $DATED_LOG." >> "$AUDIT_LOG"
-    rm -f "$CHK_NEW"
-else
-    mv "$CHK_NEW" "$CHK"
-fi
-
-# -- Whitelist filtering ------------------------------------------------------
-REAL_INFECTED=$INFECTED_COUNT
+# ── Whitelist filtering ───────────────────────────────────────────────────────
 if [ "$INFECTED_COUNT" -gt 0 ] && [ -s "$WHITE_LIST" ]; then
     REAL_INFECTED=0
-    WL_TMP=$(mktemp /tmp/clamav_found_XXXXXX)
-    echo "$FOUND_LINES" > "$WL_TMP"
-    while IFS= read -r FOUND_LINE; do
+    FILTERED_FOUND=""
+    echo "$FOUND_LINES" | while IFS= read -r FOUND_LINE; do
         [ -z "$FOUND_LINE" ] && continue
         FOUND_PATH=$(echo "$FOUND_LINE" | sed 's/: .* FOUND$//')
-        if grep -q "^${FOUND_PATH}$" "$WHITE_LIST" 2>/dev/null; then
+        if grep -qx "$FOUND_PATH" "$WHITE_LIST" 2>/dev/null; then
             echo "$NOW [WHITELIST] Suppressed alert for: $FOUND_PATH" >> "$AUDIT_LOG"
         else
             REAL_INFECTED=$((REAL_INFECTED + 1))
         fi
-    done < "$WL_TMP"
-    rm -f "$WL_TMP"
+    done
 fi
 
 END_TIME=$(date '+%Y-%m-%d %H:%M:%S')
 
-# -- Alert on detection -------------------------------------------------------
-if [ "$REAL_INFECTED" -gt 0 ]; then
+# ── Log detection events and send alert ──────────────────────────────────────
+if [ "$INFECTED_COUNT" -gt 0 ]; then
     {
         echo "=============================="
         echo "Detection Event: $NOW"
         echo "Scan Type:       $TYPE"
         echo "Files Scanned:   $FILES_SCANNED"
-        echo "Infected Count:  $REAL_INFECTED"
+        echo "Infected Count:  $INFECTED_COUNT"
         echo "Detected Files:"
         echo "$FOUND_LINES"
         echo "=============================="
     } >> "$AUDIT_LOG"
 
-    echo "CRITICAL: Virus Detected on $(hostname) [$TYPE] -- $REAL_INFECTED file(s)" | \
+    echo "CRITICAL: Virus Detected on $(hostname) [$TYPE] — $INFECTED_COUNT file(s)" | \
         mail -s "CRITICAL: Virus Detected on $(hostname) [$TYPE]" "$EMAIL_ADDR"
 fi
 
-echo "Date: $NOW | Type: $TYPE | Files: $FILES_SCANNED | Infected: $REAL_INFECTED | End: $END_TIME" >> "$WEEKLY"
+echo "Date: $NOW | Type: $TYPE | Files: $FILES_SCANNED | Infected: $INFECTED_COUNT | End: $END_TIME" >> "$WEEKLY"
 
+# ── Advance checkpoint (not on test runs) ─────────────────────────────────────
+if [ "$TYPE" != "MANUAL-TEST" ]; then
+    touch "$CHK"
+fi
 
 touch /var/lib/clamav/setup_complete
 SCANEOF
@@ -640,7 +591,7 @@ FC_LOG="${LOG_DIR}/freshclam-${TODAY}.log"
 
 mkdir -p "$LOG_DIR"
 echo "freshclam run: $(date '+%Y-%m-%d %H:%M:%S')" >> "$FC_LOG"
-/opt/freeware/bin/freshclam >> "$FC_LOG" 2>&1
+/opt/freeware/bin/freshclam 2>&1 | tee -a "$FC_LOG"
 FC_RC=$?
 if [ $FC_RC -ne 0 ]; then
     echo "[WARN] freshclam exited with code $FC_RC at $(date '+%Y-%m-%d %H:%M:%S')" >> "$FC_LOG"
@@ -663,7 +614,6 @@ WEEKLY="/var/log/clamav/weekly_report.log"
 AUDIT_LOG="/var/log/clamav/infected_audit.log"
 HOST=$(hostname)
 NOW=$(date '+%Y-%m-%d %H:%M:%S')
-TODAY=$(date '+%Y-%m-%d')
 
 [ ! -f "$WEEKLY" ] && exit 0
 
@@ -709,7 +659,6 @@ fi
     echo "======================================================"
 } | mail -s "$SUBJECT" "$EMAIL_ADDR"
 
-
 > "$WEEKLY"
 RPTEOF
 
@@ -735,38 +684,18 @@ RPTEOF
     TMP_CRON=$(mktemp /tmp/crontab_XXXXXX)
     crontab -l 2>/dev/null | grep -v "aix_clamav_scan\|aix_freshclam\|aix_clamav_weekly" > "$TMP_CRON"
     cat >> "$TMP_CRON" << CRONEOF
+
 # ClamAV automated jobs — added by clamav.ksh
-0    1 * * *  ${SCAN_SCRIPT} Daily
-0    2 * * *  ${FRESHCLAM_SCRIPT}
-0    9 * * 0  ${REPORT_SCRIPT}
+0    * * * *  root ${SCAN_SCRIPT} Hourly
+0    2 * * *  root ${FRESHCLAM_SCRIPT}
+0    9 * * 0  root ${REPORT_SCRIPT}
 CRONEOF
 
     crontab "$TMP_CRON"
-    typeset _CRON_RC=$?
     rm -f "$TMP_CRON"
 
-    # Verify cron entries are actually in crontab -l
-    if crontab -l 2>/dev/null | grep -q "aix_clamav_scan"; then
-        printf "${GREEN}[OK] Cron jobs installed.${NC}\n"
-    else
-        # Fallback: write directly to the crontab spool file
-        typeset _SPOOL="/var/spool/cron/crontabs/root"
-        printf "${YELLOW}[WARN] crontab command may have failed (rc=${_CRON_RC}), trying direct write...${NC}\n"
-        grep -v "aix_clamav_scan\|aix_freshclam\|aix_clamav_weekly" "$_SPOOL" 2>/dev/null > /tmp/clamav_cron_direct
-        printf "# ClamAV automated jobs — added by clamav.ksh\n" >> /tmp/clamav_cron_direct
-        printf "0    1 * * *  ${SCAN_SCRIPT} Daily\n" >> /tmp/clamav_cron_direct
-        printf "0    2 * * *  ${FRESHCLAM_SCRIPT}\n" >> /tmp/clamav_cron_direct
-        printf "0    9 * * 0  ${REPORT_SCRIPT}\n" >> /tmp/clamav_cron_direct
-        cp /tmp/clamav_cron_direct "$_SPOOL"
-        chmod 600 "$_SPOOL"
-        rm -f /tmp/clamav_cron_direct
-        if crontab -l 2>/dev/null | grep -q "aix_clamav_scan"; then
-            printf "${GREEN}[OK] Cron jobs installed (via direct spool write).${NC}\n"
-        else
-            printf "${RED}[FAIL] Could not install cron jobs. Add manually to root crontab.${NC}\n"
-        fi
-    fi
-    printf "     Daily scan:      ${SCAN_SCRIPT} (01:00)\n"
+    printf "${GREEN}[OK] Cron jobs installed.${NC}\n"
+    printf "     Hourly scan:     ${SCAN_SCRIPT}\n"
     printf "     Daily freshclam: ${FRESHCLAM_SCRIPT} (02:00)\n"
     printf "     Weekly report:   ${REPORT_SCRIPT} (Sunday 09:00)\n"
     print ""
@@ -794,10 +723,50 @@ run_freshclam() {
     else
         printf "${YELLOW}[WARN] freshclam exited with code ${RC}.${NC}\n"
         printf "${YELLOW}       If the download was partial or internet is unavailable,${NC}\n"
+        printf "${YELLOW}       see manual copy directions: ksh clamav.ksh --copycvd${NC}\n"
     fi
     print "========================================================="
 }
 
+# ── copy_cvd_directions ───────────────────────────────────────────────────────
+copy_cvd_from_server() {
+    check_root
+    print ""
+    print "========================================================="
+    print "    CLAMAV — CVD DATABASE MANUAL COPY DIRECTIONS"
+    print "========================================================="
+    print ""
+    print "Use this when freshclam download was partial or failed, or"
+    print "when this host has no direct internet access."
+    print ""
+    print "Current database directory on this host: ${DB_DIR}"
+    print ""
+    ls -l "${DB_DIR}/"*.cvd "${DB_DIR}/"*.cld 2>/dev/null || \
+        print "  (no .cvd or .cld files found yet)"
+    print ""
+    print "---------------------------------------------------------"
+    print "  HOW TO COPY .CVD FILES FROM ANOTHER SERVER"
+    print "---------------------------------------------------------"
+    print ""
+    print "  Option A — push FROM a server that has current databases:"
+    print "  (run this on the source server, e.g. fse6-1)"
+    print ""
+    printf "    scp /var/lib/clamav/*.cvd $(hostname):${DB_DIR}/\n"
+    print ""
+    print "  Option B — pull from THIS host:"
+    print "  (you will be prompted for the source server root password)"
+    print ""
+    printf "    cd ${DB_DIR}\n"
+    printf "    scp fse6-1:/var/lib/clamav/*.cvd .\n"
+    print ""
+    print "  After copying, verify files are present:"
+    printf "    ls -l ${DB_DIR}\n"
+    print ""
+    print "  Then verify ClamAV can read the databases:"
+    printf "    ${CLAMSCAN_BIN} --version\n"
+    printf "    ${CLAMSCAN_BIN} /tmp\n"
+    print "========================================================="
+}
 
 # ── clamav_health_check ───────────────────────────────────────────────────────
 clamav_health_check() {
@@ -810,7 +779,7 @@ clamav_health_check() {
     print ""
 
     # ── Installation ──────────────────────────────────────────────────────
-    printf "--- [Installation] ---\n"
+    print "--- [Installation] ---"
     if rpm -q clamav >/dev/null 2>&1; then
         printf "${GREEN}[OK]   ClamAV is installed: $(rpm -q clamav)${NC}\n"
     else
@@ -819,7 +788,7 @@ clamav_health_check() {
     print ""
 
     # ── Binaries ──────────────────────────────────────────────────────────
-    printf "--- [Binaries] ---\n"
+    print "--- [Binaries] ---"
     for BIN in clamscan freshclam; do
         typeset BIN_PATH="/opt/freeware/bin/${BIN}"
         if [ -x "$BIN_PATH" ]; then
@@ -834,7 +803,7 @@ clamav_health_check() {
     print ""
 
     # ── Libraries ─────────────────────────────────────────────────────────
-    printf "--- [Libraries] ---\n"
+    print "--- [Libraries] ---"
     if [ -L "$LIBUNWIND_LINK" ]; then
         printf "${GREEN}[OK]   ${LIBUNWIND_LINK}${NC}\n"
         ls -l "$LIBUNWIND_LINK"
@@ -849,7 +818,7 @@ clamav_health_check() {
     print ""
 
     # ── LIBPATH ───────────────────────────────────────────────────────────
-    printf "--- [LIBPATH] ---\n"
+    print "--- [LIBPATH] ---"
     if echo "${LIBPATH}" | grep -q "/opt/freeware/lib"; then
         printf "${GREEN}[OK]   LIBPATH includes /opt/freeware/lib${NC}\n"
     else
@@ -864,7 +833,7 @@ clamav_health_check() {
     print ""
 
     # ── Configuration ─────────────────────────────────────────────────────
-    printf "--- [Configuration] ---\n"
+    print "--- [Configuration] ---"
     if [ -f "$FRESHCLAM_CONF_DEST" ]; then
         printf "${GREEN}[OK]   ${FRESHCLAM_CONF_DEST}${NC}\n"
     else
@@ -873,59 +842,24 @@ clamav_health_check() {
     print ""
 
     # ── Virus Databases ───────────────────────────────────────────────────
-    printf "--- [Virus Databases] ---\n"
+    print "--- [Virus Databases] ---"
     typeset DB_OK=0
     for DB in daily.cvd daily.cld main.cvd main.cld bytecode.cvd bytecode.cld; do
         if [ -f "${DB_DIR}/${DB}" ]; then
-            typeset DB_PATH="${DB_DIR}/${DB}"
-            typeset DB_SIZE DB_MOD
-            DB_SIZE=$(ls -s "$DB_PATH" 2>/dev/null | awk '{print $1}')
-            DB_MOD=$(ls  -l "$DB_PATH" 2>/dev/null | awk '{print $6, $7, $8}')
-            printf "${GREEN}[OK]   %-28s  %6s KB  modified: %s${NC}\n" \
-                "$DB" "$DB_SIZE" "$DB_MOD"
+            printf "${GREEN}[OK]   ${DB_DIR}/${DB}${NC}\n"
+            ls -l "${DB_DIR}/${DB}"
             DB_OK=1
         fi
     done
     if [ "$DB_OK" -eq 0 ]; then
         printf "${RED}[FAIL] No virus databases found in ${DB_DIR}${NC}\n"
         printf "${YELLOW}       Run: ksh clamav.ksh --freshclam${NC}\n"
-    else
-        # Definition version and build date — clamscan --version outputs:
-        # ClamAV <ver>/<db_version>/<db_build_date>
-        typeset CLAM_VER_LINE
-        CLAM_VER_LINE=$("$CLAMSCAN_BIN" --version 2>/dev/null)
-        typeset DB_VER DB_DATE
-        DB_VER=$(echo  "$CLAM_VER_LINE" | awk -F'/' '{print $2}')
-        DB_DATE=$(echo "$CLAM_VER_LINE" | awk -F'/' '{print $3}')
-        if [ -n "$DB_VER" ]; then
-            printf "${CYAN}       Definition version : %s${NC}\n" "$DB_VER"
-            printf "${CYAN}       Definition built   : %s${NC}\n" "$DB_DATE"
-        fi
-        # Last freshclam run — check script log, fall back to DB file mtime
-        typeset LATEST_FC
-        LATEST_FC=$(ls "${LOG_DIR}"/freshclam-*.log 2>/dev/null | sort | tail -1)
-        if [ -n "$LATEST_FC" ]; then
-            typeset FC_LAST
-            FC_LAST=$(grep "^freshclam run:" "$LATEST_FC" 2>/dev/null | tail -1 | sed 's/freshclam run: //')
-            [ -z "$FC_LAST" ] && FC_LAST=$(ls -l "$LATEST_FC" 2>/dev/null | awk '{print $6, $7, $8}')
-            printf "${CYAN}       Last freshclam run : %s${NC}\n" "$FC_LAST"
-        else
-            # No script log — infer from DB file mtime (freshclam updates these)
-            typeset FC_MTIME
-            for _DB in daily.cvd daily.cld; do
-                [ -f "${DB_DIR}/${_DB}" ] && FC_MTIME=$(ls -l "${DB_DIR}/${_DB}" 2>/dev/null | awk '{print $6, $7, $8}') && break
-            done
-            if [ -n "$FC_MTIME" ]; then
-                printf "${CYAN}       Last freshclam run : ~%s (inferred from DB mtime)${NC}\n" "$FC_MTIME"
-            else
-                printf "${YELLOW}       No freshclam log — run: ksh clamav.ksh --freshclam${NC}\n"
-            fi
-        fi
+        printf "${YELLOW}       No internet? See copy directions: ksh clamav.ksh --copycvd${NC}\n"
     fi
     print ""
 
     # ── Path and File Validation ──────────────────────────────────────────
-    printf "--- [Path & File Validation] ---\n"
+    print "--- [Path & File Validation] ---"
     for _CP in "$LOG_DIR"        \
                "$AUDIT_LOG"      \
                "$DB_DIR"         \
@@ -942,11 +876,12 @@ clamav_health_check() {
     done
     print ""
 
-    printf "--- [Cron Jobs] ---\n"
+    # ── Cron Jobs ─────────────────────────────────────────────────────────
+    print "--- [Cron Jobs] ---"
     if crontab -l 2>/dev/null | grep -q "aix_clamav_scan"; then
-        printf "${GREEN}[OK]   Daily scan cron job present.${NC}\n"
+        printf "${GREEN}[OK]   Hourly scan cron job present.${NC}\n"
     else
-        printf "${YELLOW}[MISS] Daily scan cron job not found.${NC}\n"
+        printf "${YELLOW}[MISS] Hourly scan cron job not found.${NC}\n"
     fi
     if crontab -l 2>/dev/null | grep -q "aix_freshclam"; then
         printf "${GREEN}[OK]   Daily freshclam cron job present.${NC}\n"
@@ -961,7 +896,7 @@ clamav_health_check() {
     print ""
 
     # ── Recent Scan Activity ──────────────────────────────────────────────
-    printf "--- [Recent Scan Activity (last 5)] ---\n"
+    print "--- [Recent Scan Activity (last 5)] ---"
     if [ -f "$WEEKLY_REPORT" ] && [ -s "$WEEKLY_REPORT" ]; then
         tail -5 "$WEEKLY_REPORT"
     else
@@ -970,7 +905,7 @@ clamav_health_check() {
     print ""
 
     # ── Infected File Audit Log ───────────────────────────────────────────
-    printf "--- [Infected File Audit Log (last 30 lines)] ---\n"
+    print "--- [Infected File Audit Log (last 30 lines)] ---"
     if [ -f "$AUDIT_LOG" ] && [ -s "$AUDIT_LOG" ]; then
         tail -30 "$AUDIT_LOG"
     else
@@ -1003,7 +938,7 @@ test_clamav_setup() {
     done
     if [ "$DB_FOUND" -eq 0 ]; then
         printf "${RED}[ERROR] No virus databases found in ${DB_DIR}.${NC}\n"
-        printf "${YELLOW}        Run --freshclam to download databases.${NC}\n"
+        printf "${YELLOW}        Run --freshclam to download, or --copycvd for manual copy directions.${NC}\n"
         return 1
     fi
     printf "${GREEN}[OK] Virus databases present.${NC}\n"
@@ -1064,7 +999,7 @@ scan_directory() {
     # Capture scan output and exit code cleanly (avoids tee pipe exit code issue)
     typeset SCAN_TMP
     SCAN_TMP=$(mktemp /tmp/clamav_out_XXXXXX)
-    "$CLAMSCAN_BIN" -r "$SCAN_DIR" > "$SCAN_TMP" 2>&1
+    "$CLAMSCAN_BIN" -r "$SCAN_DIR" 2>&1 > "$SCAN_TMP"
     typeset SCAN_RC=$?
     cat "$SCAN_TMP" | tee -a "$DATED_LOG"
     rm -f "$SCAN_TMP"
@@ -1089,7 +1024,7 @@ clamav_whitelist_file() {
     printf "    CLAMAV WHITELIST MANAGER — $(hostname)\n"
     print "========================================================="
     print ""
-    printf "--- [Current Whitelist] ---\n"
+    print "--- [Current Whitelist] ---"
     if [ -s "$WHITE_LIST" ]; then
         cat -n "$WHITE_LIST"
     else
@@ -1129,7 +1064,7 @@ clamav_whitelist_file() {
                 fi
             fi
 
-            if grep -q "^${FILE_PATH}$" "$WHITE_LIST" 2>/dev/null; then
+            if grep -qx "$FILE_PATH" "$WHITE_LIST" 2>/dev/null; then
                 print "[INFO] Already whitelisted. No change made."
                 return 0
             fi
@@ -1159,14 +1094,14 @@ clamav_whitelist_file() {
             read -r REMOVE_PATH
             REMOVE_PATH=$(echo "$REMOVE_PATH" | sed 's/[[:space:]]*$//')
 
-            if ! grep -q "^${REMOVE_PATH}$" "$WHITE_LIST" 2>/dev/null; then
+            if ! grep -qx "$REMOVE_PATH" "$WHITE_LIST" 2>/dev/null; then
                 printf "${RED}[ERROR] '${REMOVE_PATH}' not found in whitelist.${NC}\n"
                 return 1
             fi
 
             typeset TMP_WL2
             TMP_WL2=$(mktemp /tmp/whitelist_XXXXXX)
-            grep -v "^${REMOVE_PATH}$" "$WHITE_LIST" > "$TMP_WL2"
+            grep -vx "$REMOVE_PATH" "$WHITE_LIST" > "$TMP_WL2"
             cp "$TMP_WL2" "$WHITE_LIST"
             rm -f "$TMP_WL2"
 
@@ -1272,320 +1207,6 @@ uninstall_clamav() {
     printf "      Remove manually if no longer needed: rm -rf ${CLAM_STAGING}\n"
 }
 
-# ── run_manual_scan ────────────────────────────────────────────
-run_manual_scan() {
-    check_root
-    set_libpath
-
-    print ""
-    print "========================================================="
-    printf "    CLAMAV AIX MANUAL FULL SCAN — $(hostname)\n"
-    print "========================================================="
-    print ""
-
-    if [ ! -x "$SCAN_SCRIPT" ]; then
-        printf "${RED}[ERROR] Scan script not found: ${SCAN_SCRIPT}${NC}\n"
-        printf "${YELLOW}        Has --setupclamav been run?${NC}\n"
-        exit 1
-    fi
-
-    # Check if a scan is already running
-    typeset LOCKFILE="/tmp/aix_clamav_scan.lock"
-    if [ -f "$LOCKFILE" ]; then
-        typeset LOCK_PID
-        LOCK_PID=$(cat "$LOCKFILE" 2>/dev/null)
-        if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
-            printf "${YELLOW}[WARN] A scan is already running (PID ${LOCK_PID}).${NC}\n"
-            printf "       Wait for it to finish or remove ${LOCKFILE} if it is stale.\n"
-            exit 1
-        fi
-    fi
-
-    printf "${YELLOW}This will run a full recursive scan of / (with exclusions).${NC}\n"
-    printf "${YELLOW}It may take 30-120 min depending on filesystem size.${NC}\n"
-    printf "Proceed? (y/N): "
-    read -r CONFIRM_SCAN
-    if [[ "$CONFIRM_SCAN" != "y" && "$CONFIRM_SCAN" != "Y" ]]; then
-        print "Aborted."
-        return 0
-    fi
-
-    print ""
-    printf "${GREEN}[+] Starting manual full scan...${NC}\n"
-    printf "    Log: ${LOG_DIR}/clamav-$(date '+%Y-%m-%d').log\n"
-    printf "    Audit: ${AUDIT_LOG}\n"
-    print ""
-
-    ksh "$SCAN_SCRIPT" Daily
-    typeset SCAN_RC=$?
-
-    print ""
-    if [ $SCAN_RC -eq 0 ]; then
-        printf "${GREEN}[DONE] Manual scan complete. No threats detected.${NC}\n"
-    elif [ $SCAN_RC -eq 1 ]; then
-        printf "${RED}[DONE] Manual scan complete. THREATS DETECTED — check audit log.${NC}\n"
-        printf "${RED}       ${AUDIT_LOG}${NC}\n"
-    else
-        printf "${YELLOW}[DONE] Manual scan complete with exit code ${SCAN_RC}.${NC}\n"
-    fi
-    print "========================================================="
-}
-
-# ── run_tests ─────────────────────────────────────────────────────────────────
-run_tests() {
-    check_root
-    typeset T_PASS=0 T_FAIL=0 T_SKIP=0 T_TOTAL=0
-    typeset SELF="$0"
-
-    # ── Test helpers ──────────────────────────────────────────────────────────
-    t_pass() {
-        T_PASS=$((T_PASS + 1)); T_TOTAL=$((T_TOTAL + 1))
-        printf "${GREEN}[PASS]${NC} $1\n"
-    }
-    t_fail() {
-        T_FAIL=$((T_FAIL + 1)); T_TOTAL=$((T_TOTAL + 1))
-        printf "${RED}[FAIL]${NC} $1\n"
-        [ -n "$2" ] && printf "       ${YELLOW}Detail: $2${NC}\n"
-    }
-    t_skip() {
-        T_SKIP=$((T_SKIP + 1)); T_TOTAL=$((T_TOTAL + 1))
-        printf "${YELLOW}[SKIP]${NC} $1 — $2\n"
-    }
-    t_section() {
-        print ""
-        printf "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
-        printf "${CYAN}  $1${NC}\n"
-        printf "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
-    }
-    t_expect_rc() {
-        typeset _DESC="$1" _EXP="$2"; shift 2
-        "$@" >/dev/null 2>&1; typeset _RC=$?
-        if [ "$_RC" -eq "$_EXP" ]; then t_pass "$_DESC (RC=$_RC)"
-        else t_fail "$_DESC" "expected RC=$_EXP got RC=$_RC"; fi
-    }
-    t_output_has() {
-        typeset _DESC="$1" _PAT="$2"; shift 2
-        typeset _OUT; _OUT=$("$@" 2>&1)
-        if echo "$_OUT" | grep -q "$_PAT"; then t_pass "$_DESC"
-        else t_fail "$_DESC" "output did not contain: $_PAT"; fi
-    }
-
-    typeset MODE="${1:---all}"
-
-    printf "\n${CYAN}═══════════════════════════════════════════════════════════${NC}\n"
-    printf "${CYAN}  CLAMAV TEST SUITE — AIX Edition — $(hostname)${NC}\n"
-    printf "${CYAN}  Mode: $MODE${NC}\n"
-    printf "${CYAN}═══════════════════════════════════════════════════════════${NC}\n"
-
-    # ── Pre-install tests ─────────────────────────────────────────────────────
-    run_pre() {
-        t_section "Phase 1 — Script Validity"
-
-        ksh -n "$SELF" >/dev/null 2>&1
-        if [ $? -eq 0 ]; then t_pass "T1.1 ksh -n syntax check"
-        else t_fail "T1.1 ksh -n syntax check" "ksh reported syntax errors"; fi
-
-        t_expect_rc "T1.2 --help exits 0"    0 ksh "$SELF" --help
-        t_output_has "T1.2 --help contains --setupclamav" "--setupclamav" ksh "$SELF" --help
-        t_expect_rc "T1.3 --ver exits 0"     0 ksh "$SELF" --ver
-        t_output_has "T1.3 --ver contains version" "2\." ksh "$SELF" --ver
-        t_expect_rc "T1.4 unknown option exits 1" 1 ksh "$SELF" --garbage
-
-        t_section "Phase 2 — Staging Check"
-
-        typeset _ORIG_STAGING=0
-        if [ -d "$CLAM_STAGING" ]; then
-            _ORIG_STAGING=1
-            mv "$CLAM_STAGING" "/tmp/clamaix_test_backup_$$" 2>/dev/null
-        fi
-
-        ksh "$SELF" --stageclamav >/dev/null 2>&1
-        if [ $? -eq 1 ]; then t_pass "T2.1 --stageclamav missing files exits 1"
-        else t_fail "T2.1 --stageclamav missing files exits 1" "expected exit 1"; fi
-        t_output_has "T2.1 --stageclamav prints MISSING" "MISSING" ksh "$SELF" --stageclamav
-        t_output_has "T2.1 --stageclamav prints scp hint" "scp" ksh "$SELF" --stageclamav
-
-        if [ "$_ORIG_STAGING" -eq 1 ]; then
-            mv "/tmp/clamaix_test_backup_$$" "$CLAM_STAGING" 2>/dev/null
-        fi
-
-        if [ -f "${CLAM_STAGING}/clamav-1.4.3-1.aix7.2.ppc.rpm" ] && \
-           [ -f "${CLAM_STAGING}/freshclam.conf" ] && \
-           [ -f "${CLAM_STAGING}/libunwind.17.1.3.0.bff" ]; then
-            t_expect_rc "T2.2 --stageclamav all present exits 0" 0 ksh "$SELF" --stageclamav
-            t_output_has "T2.2 --stageclamav shows PRESENT" "PRESENT" ksh "$SELF" --stageclamav
-        else
-            t_skip "T2.2 --stageclamav all-present" "staging files not on this host"
-        fi
-    }
-
-    # ── Post-install tests ────────────────────────────────────────────────────
-    run_post() {
-        if [ ! -x "$CLAMSCAN_BIN" ]; then
-            printf "${YELLOW}[INFO] ClamAV not installed — skipping post-install tests.${NC}\n"
-            printf "${YELLOW}       Run: ksh clamav.ksh --setupclamav first.${NC}\n"
-            return 0
-        fi
-
-        t_section "Phase 3 — Health Check"
-        t_expect_rc "T3.1 --clamavcheck exits 0" 0 ksh "$SELF" --clamavcheck
-        t_output_has "T3.1 --clamavcheck shows RPM"       "clamav-"  ksh "$SELF" --clamavcheck
-        t_output_has "T3.1 --clamavcheck shows clamscan"  "clamscan" ksh "$SELF" --clamavcheck
-
-        t_section "Phase 4 — EICAR Detection"
-        typeset _TOUT; _TOUT=$(ksh "$SELF" --testclamav 2>&1); typeset _TRC=$?
-        if echo "$_TOUT" | grep -q "PASS"; then t_pass "T4.1 --testclamav EICAR detected"
-        elif echo "$_TOUT" | grep -q "WARN"; then t_fail "T4.1 --testclamav" "databases may be missing — run --freshclam"
-        else t_fail "T4.1 --testclamav" "unexpected output (RC=$_TRC)"; fi
-        if [ ! -f /tmp/eicar_test.com ]; then t_pass "T4.2 EICAR test file cleaned up"
-        else t_fail "T4.2 EICAR test file not cleaned up" "still exists"; rm -f /tmp/eicar_test.com; fi
-
-        t_section "Phase 5 — Directory Scan"
-        t_expect_rc "T5.1 --scan /tmp clean exits 0" 0 ksh "$SELF" --scan /tmp
-        printf '%s\n' 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' \
-            > /tmp/eicar_scan_test.com 2>/dev/null
-        chmod 644 /tmp/eicar_scan_test.com
-        ksh "$SELF" --scan /tmp >/dev/null 2>&1; typeset _SRC=$?
-        rm -f /tmp/eicar_scan_test.com
-        if [ "$_SRC" -eq 1 ]; then t_pass "T5.2 --scan /tmp with EICAR exits 1"
-        else t_fail "T5.2 --scan /tmp with EICAR" "expected RC=1 got RC=$_SRC"; fi
-        t_expect_rc "T5.3 --scan nonexistent exits 1" 1 ksh "$SELF" --scan /nonexistent_clamtest_$$
-
-        t_section "Phase 6 — Automation Scripts"
-        if [ -x "$SCAN_SCRIPT" ]; then
-            typeset _WB=0 _WA=0
-            [ -f "$WEEKLY_REPORT" ] && _WB=$(wc -l < "$WEEKLY_REPORT" | awk '{print $1}')
-            ksh "$SCAN_SCRIPT" Daily >/dev/null 2>&1
-            [ -f "$WEEKLY_REPORT" ] && _WA=$(wc -l < "$WEEKLY_REPORT" | awk '{print $1}')
-            if [ "$_WA" -gt "$_WB" ]; then t_pass "T6.1 Daily scan updates weekly log"
-            elif tail -1 "$AUDIT_LOG" 2>/dev/null | grep -q "No files changed"; then
-                t_pass "T6.1 Daily scan: no files changed — incremental working"
-            else t_fail "T6.1 Daily scan" "weekly log not updated"; fi
-
-            typeset _AB=0 _AA=0
-            _AB=$(wc -l < "$AUDIT_LOG" 2>/dev/null | awk '{print $1}'); [ -z "$_AB" ] && _AB=0
-            ksh "$SCAN_SCRIPT" MANUAL-TEST >/dev/null 2>&1
-            _AA=$(wc -l < "$AUDIT_LOG" 2>/dev/null | awk '{print $1}'); [ -z "$_AA" ] && _AA=0
-            if [ "$_AA" -gt "$_AB" ]; then t_pass "T6.2 MANUAL-TEST updates audit log"
-            else t_fail "T6.2 MANUAL-TEST" "audit log not updated"; fi
-
-            echo $$ > "$LOCKFILE"
-            ksh "$SCAN_SCRIPT" Daily >/dev/null 2>&1; typeset _LRC=$?
-            rm -f "$LOCKFILE"
-            if [ "$_LRC" -eq 1 ]; then t_pass "T6.3 PID lock blocks concurrent scan"
-            else t_fail "T6.3 PID lock" "expected RC=1 got RC=$_LRC"; fi
-
-            typeset _CHKBAK=""
-            if [ -f "$CHK" ]; then
-                _CHKBAK=$(mktemp /tmp/clamav_chk_bak_XXXXXX)
-                cp "$CHK" "$_CHKBAK"; rm -f "$CHK"
-            fi
-            ksh "$SCAN_SCRIPT" Daily >/dev/null 2>&1
-            if grep -q "Full-Initial\|initial full" "$AUDIT_LOG" 2>/dev/null; then
-                t_pass "T6.4 No checkpoint triggers Full-Initial"
-            else t_fail "T6.4 No checkpoint" "Full-Initial not in audit log"; fi
-            [ -n "$_CHKBAK" ] && mv "$_CHKBAK" "$CHK"
-
-            if [ -f "$CHK" ]; then
-                ksh "$SCAN_SCRIPT" Daily >/dev/null 2>&1
-                if tail -1 "$AUDIT_LOG" 2>/dev/null | grep -q "No files changed"; then
-                    t_pass "T6.5 Second scan skips clamscan (incremental)"
-                else t_skip "T6.5 Incremental skip" "files may have changed — inconclusive"; fi
-            else t_skip "T6.5 Incremental skip" "no checkpoint present"; fi
-        else
-            t_skip "T6.x Automation script tests" "SCAN_SCRIPT not found — run --setupclamav"
-        fi
-
-        t_section "Phase 7 — Whitelist"
-        typeset _WLP="/tmp/clamav_wl_test_$$"
-        touch "$_WLP"
-        printf "1\n${_WLP}\ny\n" | ksh "$SELF" --whitelsclamav >/dev/null 2>&1
-        if grep -q "^${_WLP}$" "$WHITE_LIST" 2>/dev/null; then t_pass "T7.1 Whitelist add"
-        else t_fail "T7.1 Whitelist add" "$_WLP not found"; fi
-
-        printf "1\n${_WLP}\ny\n" | ksh "$SELF" --whitelsclamav >/dev/null 2>&1
-        typeset _WLC; _WLC=$(grep -c "^${_WLP}$" "$WHITE_LIST" 2>/dev/null | awk '{print $1}')
-        if [ "${_WLC:-0}" -eq 1 ]; then t_pass "T7.2 Whitelist no duplicate"
-        else t_fail "T7.2 Whitelist duplicate" "found $_WLC copies"; fi
-
-        printf "2\n${_WLP}\n" | ksh "$SELF" --whitelsclamav >/dev/null 2>&1
-        if ! grep -q "^${_WLP}$" "$WHITE_LIST" 2>/dev/null; then t_pass "T7.3 Whitelist remove"
-        else t_fail "T7.3 Whitelist remove" "path still present"; fi
-        rm -f "$_WLP"
-
-        typeset _RMO; _RMO=$(printf "2\n/no/such/path/$$\n" | ksh "$SELF" --whitelsclamav 2>&1)
-        if echo "$_RMO" | grep -q "ERROR\|not found"; then t_pass "T7.4 Whitelist remove non-existent shows error"
-        else t_fail "T7.4 Whitelist remove non-existent" "expected error"; fi
-
-        if grep -q "Whitelist" "$AUDIT_LOG" 2>/dev/null; then t_pass "T7.5 Whitelist changes in audit log"
-        else t_fail "T7.5 Whitelist audit log" "no entries found"; fi
-
-        t_section "Phase 8 — Manual Scan PID Lock"
-        echo $$ > "$LOCKFILE"
-        printf "y\n" | ksh "$SELF" --manualscan >/dev/null 2>&1; typeset _MRC=$?
-        rm -f "$LOCKFILE"
-        if [ "$_MRC" -eq 1 ]; then t_pass "T8.1 --manualscan blocked by PID lock"
-        else t_fail "T8.1 --manualscan PID lock" "expected RC=1 got RC=$_MRC"; fi
-
-        t_section "Phase 9 — Log Files"
-        for _F in "$LOG_DIR" "$AUDIT_LOG" "$WEEKLY_REPORT"; do
-            if [ -e "$_F" ]; then t_pass "T9.x $F exists"
-            else t_fail "T9.x $_F exists" "not found"; fi
-        done
-        typeset _TLOG="${LOG_DIR}/clamav-$(date '+%Y-%m-%d').log"
-        if [ -f "$_TLOG" ]; then t_pass "T9.x Dated scan log exists today"
-        else t_fail "T9.x Dated scan log" "$_TLOG not found"; fi
-
-        t_section "Phase 10 — Cron Jobs"
-        if crontab -l 2>/dev/null | grep -q "aix_clamav_scan"; then t_pass "T10.1 Daily scan cron present"
-        else t_fail "T10.1 Daily scan cron" "not in crontab"; fi
-        if crontab -l 2>/dev/null | grep -q "aix_freshclam"; then t_pass "T10.2 Freshclam cron present"
-        else t_fail "T10.2 Freshclam cron" "not in crontab"; fi
-        if crontab -l 2>/dev/null | grep -q "aix_clamav_weekly"; then t_pass "T10.3 Weekly report cron present"
-        else t_fail "T10.3 Weekly report cron" "not in crontab"; fi
-        if [ "${_BC:-0}" -eq 0 ]; then t_pass "T10.4 No 'root' field in cron (5-field AIX format)"
-        else t_fail "T10.4 Cron format" "$_BC entries have 'root' user field"; fi
-
-        t_section "Phase 11 — LIBPATH"
-        if grep -q "BEGIN ClamAV LIBPATH" /etc/profile 2>/dev/null; then t_pass "T11.1 LIBPATH block in /etc/profile"
-        else t_fail "T11.1 LIBPATH block" "not found"; fi
-        typeset _LC; _LC=$(grep -c "BEGIN ClamAV LIBPATH" /etc/profile 2>/dev/null | awk '{print $1}')
-        if [ "${_LC:-0}" -eq 1 ]; then t_pass "T11.2 LIBPATH block not duplicated"
-        else t_fail "T11.2 LIBPATH duplicated" "$_LC copies found"; fi
-    }
-
-    case "$MODE" in
-        --pre)  run_pre ;;
-        --post) run_post ;;
-        --all)  run_pre; run_post ;;
-        *)
-            printf "${RED}[ERROR] Unknown test mode: $MODE${NC}\n"
-            printf "Usage: ksh clamav.ksh --runtests [--pre | --post | --all]\n"
-            return 1
-            ;;
-    esac
-
-    # ── Summary ───────────────────────────────────────────────────────────────
-    print ""
-    printf "${CYAN}═══════════════════════════════════════════════════════════${NC}\n"
-    printf "${CYAN}  TEST SUMMARY — $(hostname) — $(date '+%Y-%m-%d %H:%M:%S')${NC}\n"
-    printf "${CYAN}═══════════════════════════════════════════════════════════${NC}\n"
-    printf "  Total:   $T_TOTAL\n"
-    printf "${GREEN}  Passed:  $T_PASS${NC}\n"
-    printf "${RED}  Failed:  $T_FAIL${NC}\n"
-    printf "${YELLOW}  Skipped: $T_SKIP${NC}\n"
-    printf "${CYAN}═══════════════════════════════════════════════════════════${NC}\n"
-    print ""
-    if [ "$T_FAIL" -eq 0 ]; then
-        printf "${GREEN}  ALL TESTS PASSED${NC}\n"
-    else
-        printf "${RED}  $T_FAIL TEST(S) FAILED — review output above${NC}\n"
-    fi
-    print ""
-    [ "$T_FAIL" -eq 0 ]
-}
-
-
 # ── Main Dispatcher ───────────────────────────────────────────────────────────
 case "$1" in
     --ver)           print_version ;;
@@ -1593,13 +1214,12 @@ case "$1" in
     --stageclamav)   stage_clamav ;;
     --setupclamav)   setup_clamav ;;
     --freshclam)     run_freshclam ;;
+    --copycvd)       copy_cvd_from_server ;;
     --clamavcheck)   clamav_health_check ;;
     --testclamav)    test_clamav_setup ;;
     --scan)          scan_directory "$2" ;;
-    --manualscan)    run_manual_scan ;;
     --whitelsclamav) clamav_whitelist_file ;;
     --removeclamav)  uninstall_clamav ;;
-    --runtests)      run_tests "$2" ;;
     *)
         printf "${RED}Error:${NC} Unknown option: $1\n"
         printf "${GREEN}Run 'ksh clamav.ksh --help' to learn usage${NC}\n"
