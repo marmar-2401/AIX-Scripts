@@ -155,9 +155,9 @@ exit 0
 stage_clamav() {
     check_root
     print ""
-    print "========================================================="
+    printf "%s\n" '========================================================='
     print "    CLAMAV AIX — STAGING CHECK"
-    print "========================================================="
+    printf "%s\n" '========================================================='
     print ""
     print "Checking for required files in ${CLAM_STAGING}..."
     print ""
@@ -183,7 +183,7 @@ stage_clamav() {
         print ""
         print "Run the following to install:"
         printf "  ksh clamav.ksh --setupclamav\n"
-        print "========================================================="
+        printf "%s\n" '========================================================='
         return 0
     fi
 
@@ -192,9 +192,9 @@ stage_clamav() {
     printf "${YELLOW}One or more required files are missing.${NC}\n"
     print "Place the files manually using the steps below."
     print ""
-    print "---------------------------------------------------------"
+    printf "%s\n" '---------------------------------------------------------'
     print "  HOW TO STAGE THE FILES"
-    print "---------------------------------------------------------"
+    printf "%s\n" '---------------------------------------------------------'
     print ""
     print "  On THIS host, as root:"
     print ""
@@ -226,7 +226,7 @@ stage_clamav() {
     print ""
     print "  When all files show [PRESENT], run the install:"
     printf "    ksh clamav.ksh --setupclamav\n"
-    print "========================================================="
+    printf "%s\n" '========================================================='
     exit 1
 }
 
@@ -240,11 +240,11 @@ setup_clamav() {
     read -r EMAIL
 
     print ""
-    print "========================================================="
+    printf "%s\n" '========================================================='
     printf "  ClamAV Installation — AIX $(oslevel -r 2>/dev/null || oslevel)\n"
     print "  Do NOT cancel mid-install."
     print "  Total time: 5-25 min depending on network speed."
-    print "========================================================="
+    printf "%s\n" '========================================================='
     print ""
 
     # ── Check if already installed ─────────────────────────────────────────
@@ -410,14 +410,12 @@ LIBEOF
         if [ $? -ne 0 ]; then
             printf "${YELLOW}[WARN] freshclam exited with errors. Database may be incomplete.${NC}\n"
             printf "${YELLOW}       Re-run with:  ksh clamav.ksh --freshclam${NC}\n"
-            printf "${YELLOW}       If no internet access, see directions: ksh clamav.ksh --copycvd${NC}\n"
         else
             printf "${GREEN}[OK] Virus databases updated successfully.${NC}\n"
         fi
     else
         printf "${YELLOW}[SKIP] freshclam not run.${NC}\n"
         printf "${YELLOW}       Update databases with:    ksh clamav.ksh --freshclam${NC}\n"
-        printf "${YELLOW}       Manual copy directions:   ksh clamav.ksh --copycvd${NC}\n"
     fi
     print ""
 
@@ -427,7 +425,7 @@ LIBEOF
     touch "$SETUP_COMPLETE"
 
     print ""
-    print "========================================================="
+    printf "%s\n" '========================================================='
     print "  ClamAV Setup Complete on AIX."
     print ""
     print "  Next steps:"
@@ -441,7 +439,7 @@ LIBEOF
     print "       ksh clamav.ksh --scan /home"
     print "    5. Run the included clamscan.sh script (optional):"
     printf "       cd ${CLAM_STAGING} && ./clamscan.sh &\n"
-    print "========================================================="
+    printf "%s\n" '========================================================='
 }
 
 # ── setup_cron_jobs ───────────────────────────────────────────────────────────
@@ -684,18 +682,33 @@ RPTEOF
     TMP_CRON=$(mktemp /tmp/crontab_XXXXXX)
     crontab -l 2>/dev/null | grep -v "aix_clamav_scan\|aix_freshclam\|aix_clamav_weekly" > "$TMP_CRON"
     cat >> "$TMP_CRON" << CRONEOF
-
 # ClamAV automated jobs — added by clamav.ksh
-0    * * * *  root ${SCAN_SCRIPT} Hourly
-0    2 * * *  root ${FRESHCLAM_SCRIPT}
-0    9 * * 0  root ${REPORT_SCRIPT}
+0    1 * * *  ${SCAN_SCRIPT} Daily
+0    2 * * *  ${FRESHCLAM_SCRIPT}
+0    9 * * 0  ${REPORT_SCRIPT}
 CRONEOF
 
     crontab "$TMP_CRON"
+    typeset _CRON_RC=$?
     rm -f "$TMP_CRON"
 
-    printf "${GREEN}[OK] Cron jobs installed.${NC}\n"
-    printf "     Hourly scan:     ${SCAN_SCRIPT}\n"
+    if crontab -l 2>/dev/null | grep -q "aix_clamav_scan"; then
+        printf "${GREEN}[OK] Cron jobs installed.${NC}\n"
+    else
+        typeset _SPOOL="/var/spool/cron/crontabs/root"
+        printf "${YELLOW}[WARN] crontab cmd failed (rc=${_CRON_RC}), writing direct...${NC}\n"
+        grep -v "aix_clamav_scan\|aix_freshclam\|aix_clamav_weekly" "$_SPOOL" 2>/dev/null > /tmp/clamav_cron_direct
+        printf "# ClamAV automated jobs — added by clamav.ksh\n" >> /tmp/clamav_cron_direct
+        printf "0    1 * * *  ${SCAN_SCRIPT} Daily\n" >> /tmp/clamav_cron_direct
+        printf "0    2 * * *  ${FRESHCLAM_SCRIPT}\n" >> /tmp/clamav_cron_direct
+        printf "0    9 * * 0  ${REPORT_SCRIPT}\n" >> /tmp/clamav_cron_direct
+        cp /tmp/clamav_cron_direct "$_SPOOL" && chmod 600 "$_SPOOL"
+        rm -f /tmp/clamav_cron_direct
+        crontab -l 2>/dev/null | grep -q "aix_clamav_scan" && \
+            printf "${GREEN}[OK] Cron jobs installed (direct spool write).${NC}\n" || \
+            printf "${RED}[FAIL] Could not install cron jobs. Add manually to root crontab.${NC}\n"
+    fi
+    printf "     Daily scan:      ${SCAN_SCRIPT} (01:00)\n"
     printf "     Daily freshclam: ${FRESHCLAM_SCRIPT} (02:00)\n"
     printf "     Weekly report:   ${REPORT_SCRIPT} (Sunday 09:00)\n"
     print ""
@@ -706,9 +719,9 @@ run_freshclam() {
     check_root
     set_libpath
     print ""
-    print "========================================================="
+    printf "%s\n" '========================================================='
     print "    CLAMAV — FRESHCLAM UPDATE"
-    print "========================================================="
+    printf "%s\n" '========================================================='
     print ""
     print "Updating virus signature databases..."
     print "This may take several minutes depending on network speed."
@@ -723,49 +736,9 @@ run_freshclam() {
     else
         printf "${YELLOW}[WARN] freshclam exited with code ${RC}.${NC}\n"
         printf "${YELLOW}       If the download was partial or internet is unavailable,${NC}\n"
-        printf "${YELLOW}       see manual copy directions: ksh clamav.ksh --copycvd${NC}\n"
+        printf "${YELLOW}       Re-run with: ksh clamav.ksh --freshclam${NC}\n"
     fi
-    print "========================================================="
-}
-
-# ── copy_cvd_directions ───────────────────────────────────────────────────────
-copy_cvd_from_server() {
-    check_root
-    print ""
-    print "========================================================="
-    print "    CLAMAV — CVD DATABASE MANUAL COPY DIRECTIONS"
-    print "========================================================="
-    print ""
-    print "Use this when freshclam download was partial or failed, or"
-    print "when this host has no direct internet access."
-    print ""
-    print "Current database directory on this host: ${DB_DIR}"
-    print ""
-    ls -l "${DB_DIR}/"*.cvd "${DB_DIR}/"*.cld 2>/dev/null || \
-        print "  (no .cvd or .cld files found yet)"
-    print ""
-    print "---------------------------------------------------------"
-    print "  HOW TO COPY .CVD FILES FROM ANOTHER SERVER"
-    print "---------------------------------------------------------"
-    print ""
-    print "  Option A — push FROM a server that has current databases:"
-    print "  (run this on the source server, e.g. fse6-1)"
-    print ""
-    printf "    scp /var/lib/clamav/*.cvd $(hostname):${DB_DIR}/\n"
-    print ""
-    print "  Option B — pull from THIS host:"
-    print "  (you will be prompted for the source server root password)"
-    print ""
-    printf "    cd ${DB_DIR}\n"
-    printf "    scp fse6-1:/var/lib/clamav/*.cvd .\n"
-    print ""
-    print "  After copying, verify files are present:"
-    printf "    ls -l ${DB_DIR}\n"
-    print ""
-    print "  Then verify ClamAV can read the databases:"
-    printf "    ${CLAMSCAN_BIN} --version\n"
-    printf "    ${CLAMSCAN_BIN} /tmp\n"
-    print "========================================================="
+    printf "%s\n" '========================================================='
 }
 
 # ── clamav_health_check ───────────────────────────────────────────────────────
@@ -773,13 +746,13 @@ clamav_health_check() {
     check_root
     set_libpath
     print ""
-    print "========================================================="
+    printf "%s\n" '========================================================='
     printf "    CLAMAV AIX SYSTEM CHECK-UP — $(hostname)\n"
-    print "========================================================="
+    printf "%s\n" '========================================================='
     print ""
 
     # ── Installation ──────────────────────────────────────────────────────
-    print "--- [Installation] ---"
+    printf "%s\n" '--- [Installation] ---'
     if rpm -q clamav >/dev/null 2>&1; then
         printf "${GREEN}[OK]   ClamAV is installed: $(rpm -q clamav)${NC}\n"
     else
@@ -788,7 +761,7 @@ clamav_health_check() {
     print ""
 
     # ── Binaries ──────────────────────────────────────────────────────────
-    print "--- [Binaries] ---"
+    printf "%s\n" '--- [Binaries] ---'
     for BIN in clamscan freshclam; do
         typeset BIN_PATH="/opt/freeware/bin/${BIN}"
         if [ -x "$BIN_PATH" ]; then
@@ -803,7 +776,7 @@ clamav_health_check() {
     print ""
 
     # ── Libraries ─────────────────────────────────────────────────────────
-    print "--- [Libraries] ---"
+    printf "%s\n" '--- [Libraries] ---'
     if [ -L "$LIBUNWIND_LINK" ]; then
         printf "${GREEN}[OK]   ${LIBUNWIND_LINK}${NC}\n"
         ls -l "$LIBUNWIND_LINK"
@@ -818,7 +791,7 @@ clamav_health_check() {
     print ""
 
     # ── LIBPATH ───────────────────────────────────────────────────────────
-    print "--- [LIBPATH] ---"
+    printf "%s\n" '--- [LIBPATH] ---'
     if echo "${LIBPATH}" | grep -q "/opt/freeware/lib"; then
         printf "${GREEN}[OK]   LIBPATH includes /opt/freeware/lib${NC}\n"
     else
@@ -833,7 +806,7 @@ clamav_health_check() {
     print ""
 
     # ── Configuration ─────────────────────────────────────────────────────
-    print "--- [Configuration] ---"
+    printf "%s\n" '--- [Configuration] ---'
     if [ -f "$FRESHCLAM_CONF_DEST" ]; then
         printf "${GREEN}[OK]   ${FRESHCLAM_CONF_DEST}${NC}\n"
     else
@@ -841,25 +814,53 @@ clamav_health_check() {
     fi
     print ""
 
-    # ── Virus Databases ───────────────────────────────────────────────────
-    print "--- [Virus Databases] ---"
+    # ── Virus Databases ─────────────────────────────────────────────────────
+    printf "--- [Virus Databases] ---\n"
     typeset DB_OK=0
     for DB in daily.cvd daily.cld main.cvd main.cld bytecode.cvd bytecode.cld; do
         if [ -f "${DB_DIR}/${DB}" ]; then
-            printf "${GREEN}[OK]   ${DB_DIR}/${DB}${NC}\n"
-            ls -l "${DB_DIR}/${DB}"
+            typeset DB_KB DB_MTIME
+            DB_KB=$(ls -l "${DB_DIR}/${DB}" 2>/dev/null | awk '{printf "%.0f", $5/1024}')
+            DB_MTIME=$(ls -l "${DB_DIR}/${DB}" 2>/dev/null | awk '{print $6, $7, $8}')
+            printf "${GREEN}[OK]   %-30s %8s KB  modified: %s${NC}\n" "$DB" "$DB_KB" "$DB_MTIME"
             DB_OK=1
         fi
     done
     if [ "$DB_OK" -eq 0 ]; then
         printf "${RED}[FAIL] No virus databases found in ${DB_DIR}${NC}\n"
         printf "${YELLOW}       Run: ksh clamav.ksh --freshclam${NC}\n"
-        printf "${YELLOW}       No internet? See copy directions: ksh clamav.ksh --copycvd${NC}\n"
+    fi
+    if [ "$DB_OK" -eq 1 ]; then
+        typeset CLAM_VER_LINE DB_VER DB_DATE
+        CLAM_VER_LINE=$("$CLAMSCAN_BIN" --version 2>/dev/null)
+        DB_VER=$(printf '%s' "$CLAM_VER_LINE" | awk -F'/' '{print $2}')
+        DB_DATE=$(printf '%s' "$CLAM_VER_LINE" | awk -F'/' '{print $3}')
+        [ -n "$DB_VER" ] && printf "${CYAN}       Definition version : %s${NC}\n" "$DB_VER"
+        [ -n "$DB_DATE" ] && printf "${CYAN}       Definition built   : %s${NC}\n" "$DB_DATE"
+        # Last freshclam run — check script log, fall back to DB file mtime
+        typeset LATEST_FC
+        LATEST_FC=$(ls "${LOG_DIR}"/freshclam-*.log 2>/dev/null | sort | tail -1)
+        if [ -n "$LATEST_FC" ]; then
+            typeset FC_LAST
+            FC_LAST=$(grep "^freshclam run:" "$LATEST_FC" 2>/dev/null | tail -1 | sed 's/freshclam run: //')
+            [ -z "$FC_LAST" ] && FC_LAST=$(ls -l "$LATEST_FC" 2>/dev/null | awk '{print $6, $7, $8}')
+            printf "${CYAN}       Last freshclam run : %s${NC}\n" "$FC_LAST"
+        else
+            typeset FC_MTIME
+            for _DB in daily.cvd daily.cld; do
+                [ -f "${DB_DIR}/${_DB}" ] && FC_MTIME=$(ls -l "${DB_DIR}/${_DB}" 2>/dev/null | awk '{print $6, $7, $8}') && break
+            done
+            if [ -n "$FC_MTIME" ]; then
+                printf "${CYAN}       Last freshclam run : ~%s (inferred from DB mtime)${NC}\n" "$FC_MTIME"
+            else
+                printf "${YELLOW}       No freshclam log — run: ksh clamav.ksh --freshclam${NC}\n"
+            fi
+        fi
     fi
     print ""
 
-    # ── Path and File Validation ──────────────────────────────────────────
-    print "--- [Path & File Validation] ---"
+    # ── Path and File Validation    # ── Path and File Validation ──────────────────────────────────────────
+    printf "%s\n" '--- [Path & File Validation] ---'
     for _CP in "$LOG_DIR"        \
                "$AUDIT_LOG"      \
                "$DB_DIR"         \
@@ -877,7 +878,7 @@ clamav_health_check() {
     print ""
 
     # ── Cron Jobs ─────────────────────────────────────────────────────────
-    print "--- [Cron Jobs] ---"
+    printf "%s\n" '--- [Cron Jobs] ---'
     if crontab -l 2>/dev/null | grep -q "aix_clamav_scan"; then
         printf "${GREEN}[OK]   Hourly scan cron job present.${NC}\n"
     else
@@ -896,7 +897,7 @@ clamav_health_check() {
     print ""
 
     # ── Recent Scan Activity ──────────────────────────────────────────────
-    print "--- [Recent Scan Activity (last 5)] ---"
+    printf "%s\n" '--- [Recent Scan Activity (last 5)] ---'
     if [ -f "$WEEKLY_REPORT" ] && [ -s "$WEEKLY_REPORT" ]; then
         tail -5 "$WEEKLY_REPORT"
     else
@@ -905,13 +906,13 @@ clamav_health_check() {
     print ""
 
     # ── Infected File Audit Log ───────────────────────────────────────────
-    print "--- [Infected File Audit Log (last 30 lines)] ---"
+    printf "%s\n" '--- [Infected File Audit Log (last 30 lines)] ---'
     if [ -f "$AUDIT_LOG" ] && [ -s "$AUDIT_LOG" ]; then
         tail -30 "$AUDIT_LOG"
     else
         print "No infections recorded yet."
     fi
-    print "========================================================="
+    printf "%s\n" '========================================================='
 }
 
 # ── test_clamav_setup ─────────────────────────────────────────────────────────
@@ -919,9 +920,9 @@ test_clamav_setup() {
     check_root
     set_libpath
     print ""
-    print "========================================================="
+    printf "%s\n" '========================================================='
     print "       CLAMAV AIX FUNCTIONALITY TEST"
-    print "========================================================="
+    printf "%s\n" '========================================================='
 
     print "[+] Verifying clamscan binary..."
     if [ ! -x "$CLAMSCAN_BIN" ]; then
@@ -938,7 +939,7 @@ test_clamav_setup() {
     done
     if [ "$DB_FOUND" -eq 0 ]; then
         printf "${RED}[ERROR] No virus databases found in ${DB_DIR}.${NC}\n"
-        printf "${YELLOW}        Run --freshclam to download, or --copycvd for manual copy directions.${NC}\n"
+        printf "${YELLOW}        Run --freshclam to download databases.${NC}\n"
         return 1
     fi
     printf "${GREEN}[OK] Virus databases present.${NC}\n"
@@ -970,7 +971,7 @@ test_clamav_setup() {
     print "[+] Running a scan of /tmp..."
     "$CLAMSCAN_BIN" /tmp
     print ""
-    print "========================================================="
+    printf "%s\n" '========================================================='
 }
 
 # ── scan_directory ────────────────────────────────────────────────────────────
@@ -990,9 +991,9 @@ scan_directory() {
     typeset DATED_LOG="${LOG_DIR}/clamav-${TODAY_DATE}.log"
 
     print ""
-    print "========================================================="
+    printf "%s\n" '========================================================='
     printf "    CLAMAV AIX SCAN — ${SCAN_DIR}\n"
-    print "========================================================="
+    printf "%s\n" '========================================================='
     printf "Scanning: ${SCAN_DIR}\n"
     printf "Log:      ${DATED_LOG}\n\n"
 
@@ -1013,18 +1014,18 @@ scan_directory() {
     else
         printf "${YELLOW}[WARN] clamscan returned code ${SCAN_RC}${NC}\n"
     fi
-    print "========================================================="
+    printf "%s\n" '========================================================='
 }
 
 # ── clamav_whitelist_file ─────────────────────────────────────────────────────
 clamav_whitelist_file() {
     check_root
     print ""
-    print "========================================================="
+    printf "%s\n" '========================================================='
     printf "    CLAMAV WHITELIST MANAGER — $(hostname)\n"
-    print "========================================================="
+    printf "%s\n" '========================================================='
     print ""
-    print "--- [Current Whitelist] ---"
+    printf "%s\n" '--- [Current Whitelist] ---'
     if [ -s "$WHITE_LIST" ]; then
         cat -n "$WHITE_LIST"
     else
@@ -1128,7 +1129,7 @@ clamav_whitelist_file() {
         4) print "Exiting." ;;
         *) printf "${RED}[ERROR] Invalid option.${NC}\n"; return 1 ;;
     esac
-    print "========================================================="
+    printf "%s\n" '========================================================='
 }
 
 # ── uninstall_clamav ──────────────────────────────────────────────────────────
@@ -1214,7 +1215,6 @@ case "$1" in
     --stageclamav)   stage_clamav ;;
     --setupclamav)   setup_clamav ;;
     --freshclam)     run_freshclam ;;
-    --copycvd)       copy_cvd_from_server ;;
     --clamavcheck)   clamav_health_check ;;
     --testclamav)    test_clamav_setup ;;
     --scan)          scan_directory "$2" ;;
