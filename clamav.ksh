@@ -140,7 +140,7 @@ printf "\n${MAGENTA}Status Options:${NC}\n"
 printf "${YELLOW}--clamavcheck${NC}       # Gives you full status of ClamAV on AIX\n\n"
 printf "${YELLOW}--testclamav${NC}        # Tests ClamAV is working with an EICAR file and /tmp scan\n\n"
 printf "${YELLOW}--scan <DIR>${NC}        # Scans a specified directory\n\n"
-printf "${YELLOW}--manualscan${NC}        # Triggers an immediate full system scan (same as the daily cron job)\n\n"
+printf "${YELLOW}--manualscan${NC}        # Triggers an immediate incremental scan (same logic as daily cron)\n\n"
 printf "\n${MAGENTA}Configuration Options:${NC}\n"
 printf "${YELLOW}--whitelsclamav${NC}     # Manage the scan false positive whitelist\n\n"
 printf "\n${MAGENTA}Testing Options:${NC}\n"
@@ -451,7 +451,7 @@ setup_cron_jobs() {
     # ── aix_clamav_scan.sh ────────────────────────────────────────────────
     cat > "$SCAN_SCRIPT" << 'SCANEOF'
 #!/bin/ksh
-# aix_clamav_scan.sh - ClamAV hourly scanner for AIX (managed by clamav.ksh)
+# aix_clamav_scan.sh - ClamAV incremental scanner for AIX (managed by clamav.ksh)
 
 if [ -z "$LIBPATH" ]; then
     export LIBPATH=/opt/freeware/lib:/usr/lib:/usr/lpp/xlC/lib
@@ -460,7 +460,7 @@ else
 fi
 
 CLAMSCAN=/opt/freeware/bin/clamscan
-TYPE=${1:-Hourly}
+TYPE=${1:-Daily}
 LOCKFILE="/tmp/aix_clamav_scan.lock"
 EMAIL_ADDR="__EMAIL__"
 CHK="/var/lib/clamav/scan_checkpoint"
@@ -501,13 +501,26 @@ elif [ ! -f "$CHK" ]; then
         --exclude-dir=^/var/log/clamav \
         /"
 else
-    SCAN_ARGS="-r -i \
-        --exclude-dir=^/proc \
-        --exclude-dir=^/dev  \
-        --exclude-dir=^/sys  \
-        --exclude-dir=^/var/lib/clamav \
-        --exclude-dir=^/var/log/clamav \
-        /"
+    # ── Incremental scan: only files newer than last checkpoint ──────────────
+    CHK_NEW="/var/lib/clamav/scan_checkpoint.new"
+    FILE_LIST_TMP=$(mktemp /tmp/clamav_filelist_XXXXXX)
+    touch "$CHK_NEW"
+    find / \( \
+        -path /proc -o \
+        -path /dev  -o \
+        -path /sys  -o \
+        -path /var/lib/clamav -o \
+        -path /var/log/clamav \
+    \) -prune -o -newer "$CHK" -type f -print > "$FILE_LIST_TMP" 2>/dev/null
+    FILE_COUNT=$(wc -l < "$FILE_LIST_TMP" | awk '{print $1}')
+    if [ "$FILE_COUNT" -eq 0 ]; then
+        echo "Date: $NOW | Type: $TYPE | Files: 0 | Infected: 0 | No changes since last scan." >> "$DATED_LOG"
+        rm -f "$FILE_LIST_TMP" "$CHK_NEW"
+        mv "$CHK_NEW" "$CHK" 2>/dev/null || touch "$CHK"
+        rm -f "$LOCKFILE"
+        exit 0
+    fi
+    SCAN_ARGS="-i --file-list=$FILE_LIST_TMP"
 fi
 
 # ── Run scan ──────────────────────────────────────────────────────────────────
@@ -516,6 +529,7 @@ SCAN_TMP=$(mktemp /tmp/clamav_out_XXXXXX)
     echo "=== ClamAV Scan: $NOW | Type: $TYPE ==="
     nice -n 17 $CLAMSCAN $SCAN_ARGS 2>&1
 } > "$SCAN_TMP"
+SCAN_RC=$?
 cat "$SCAN_TMP" >> "$DATED_LOG"
 
 # ── Parse results ─────────────────────────────────────────────────────────────
@@ -527,6 +541,7 @@ FILES_SCANNED=$(grep "Scanned files:" "$SCAN_TMP" | awk '{print $NF}')
 
 FOUND_LINES=$(grep "FOUND" "$SCAN_TMP")
 rm -f "$SCAN_TMP"
+[ -n "$FILE_LIST_TMP" ] && rm -f "$FILE_LIST_TMP"
 
 # ── Whitelist filtering ───────────────────────────────────────────────────────
 if [ "$INFECTED_COUNT" -gt 0 ] && [ -s "$WHITE_LIST" ]; then
@@ -564,9 +579,13 @@ fi
 
 echo "Date: $NOW | Type: $TYPE | Files: $FILES_SCANNED | Infected: $INFECTED_COUNT | End: $END_TIME" >> "$WEEKLY"
 
-# ── Advance checkpoint (not on test runs) ─────────────────────────────────────
-if [ "$TYPE" != "MANUAL-TEST" ]; then
-    touch "$CHK"
+# ── Advance checkpoint (not on test runs, not on scan error) ─────────────────
+if [ "$TYPE" != "MANUAL-TEST" ] && [ "${SCAN_RC:-0}" -ne 2 ]; then
+    if [ -f "$CHK_NEW" ]; then
+        mv "$CHK_NEW" "$CHK"
+    else
+        touch "$CHK"
+    fi
 fi
 
 touch /var/lib/clamav/setup_complete
@@ -880,9 +899,9 @@ clamav_health_check() {
     # ── Cron Jobs ─────────────────────────────────────────────────────────
     printf "%s\n" '--- [Cron Jobs] ---'
     if crontab -l 2>/dev/null | grep -q "aix_clamav_scan"; then
-        printf "${GREEN}[OK]   Hourly scan cron job present.${NC}\n"
+        printf "${GREEN}[OK]   Daily scan cron job present.${NC}\n"
     else
-        printf "${YELLOW}[MISS] Hourly scan cron job not found.${NC}\n"
+        printf "${YELLOW}[MISS] Daily scan cron job not found.${NC}\n"
     fi
     if crontab -l 2>/dev/null | grep -q "aix_freshclam"; then
         printf "${GREEN}[OK]   Daily freshclam cron job present.${NC}\n"
@@ -1208,6 +1227,126 @@ uninstall_clamav() {
     printf "      Remove manually if no longer needed: rm -rf ${CLAM_STAGING}\n"
 }
 
+# ── run_manual_scan ───────────────────────────────────────────────────────────
+run_manual_scan() {
+    check_root
+    set_libpath
+    print ""
+    printf "Trigger an immediate scan now (incremental — same logic as daily cron).\n"
+    printf "Continue? (y/N): "
+    read -r _CONF
+    [[ "$_CONF" != "y" && "$_CONF" != "Y" ]] && print "Aborted." && return 0
+    ksh "$SCAN_SCRIPT"
+}
+
+
+# ── run_tests ─────────────────────────────────────────────────────────────────
+run_tests() {
+    typeset MODE="${1:---all}"
+    typeset SELF="$0"
+    typeset _PASS=0 _FAIL=0 _SKIP=0
+
+    t_pass() { printf "${GREEN}[PASS]${NC} %s\n" "$1"; _PASS=$((_PASS+1)); }
+    t_fail() { printf "${RED}[FAIL]${NC} %s — %s\n" "$1" "$2"; _FAIL=$((_FAIL+1)); }
+    t_skip() { printf "${YELLOW}[SKIP]${NC} %s — %s\n" "$1" "$2"; _SKIP=$((_SKIP+1)); }
+    t_section() { printf "\n${CYAN}=== %s ===${NC}\n" "$1"; }
+    t_expect_rc() {
+        typeset _lbl="$1" _want="$2"; shift 2
+        typeset _got; "$@" >/dev/null 2>&1; _got=$?
+        [ "$_got" -eq "$_want" ] && t_pass "$_lbl" || t_fail "$_lbl" "rc=$_got want=$_want"
+    }
+    t_output_has() {
+        typeset _lbl="$1" _pat="$2"; shift 2
+        typeset _out; _out=$("$@" 2>&1)
+        printf '%s' "$_out" | grep -q "$_pat" && t_pass "$_lbl" || t_fail "$_lbl" "pattern '$_pat' not found"
+    }
+
+    run_pre() {
+        t_section "PRE-INSTALL TESTS"
+
+        t_section "Syntax"
+        ksh -n "$SELF" 2>/dev/null && t_pass "T1.1 Syntax check" || t_fail "T1.1 Syntax check" "ksh -n failed"
+
+        t_section "Basic options"
+        t_expect_rc "T2.1 --help exits 0"    0 ksh "$SELF" --help
+        t_expect_rc "T2.2 --ver exits 0"     0 ksh "$SELF" --ver
+        t_expect_rc "T2.3 unknown opt exits 1" 1 ksh "$SELF" --notanoption
+
+        t_section "Staging check"
+        if [ -f "${CLAM_STAGING}/clamav-1.4.3-1.aix7.2.ppc.rpm" ]; then
+            t_output_has "T3.1 --stageclamav shows PRESENT" "PRESENT" ksh "$SELF" --stageclamav
+        else
+            t_skip "T3.1 --stageclamav PRESENT" "staging files not on this host"
+        fi
+        t_output_has "T3.2 --stageclamav runs without error" "STAGING" ksh "$SELF" --stageclamav
+    }
+
+    run_post() {
+        t_section "POST-INSTALL TESTS"
+
+        t_section "Health check"
+        t_output_has "T4.1 --clamavcheck shows OK" "OK" ksh "$SELF" --clamavcheck
+
+        t_section "EICAR detection"
+        printf 'X5O!P%%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' > /tmp/eicar_runtests.com
+        typeset _EIRC; ksh "$SELF" --scan /tmp >/dev/null 2>&1; _EIRC=$?
+        rm -f /tmp/eicar_runtests.com
+        [ "$_EIRC" -eq 1 ] && t_pass "T5.1 EICAR detected (rc=1)" || t_fail "T5.1 EICAR detected" "rc=$_EIRC want=1"
+
+        t_section "Clean scan"
+        typeset _TMPDIR; _TMPDIR=$(mktemp -d /tmp/clamtest_XXXXXX)
+        printf "harmless test file\n" > "$_TMPDIR/clean.txt"
+        t_expect_rc "T6.1 Clean scan exits 0" 0 ksh "$SELF" --scan "$_TMPDIR"
+        rm -rf "$_TMPDIR"
+
+        t_section "Whitelist"
+        typeset _WLP="/tmp/wl_test_$$_clamav"
+        touch "$_WLP"
+        printf "1\n${_WLP}\ny\n" | ksh "$SELF" --whitelsclamav >/dev/null 2>&1
+        if grep -q "^${_WLP}$" "$WHITE_LIST" 2>/dev/null; then t_pass "T7.1 Whitelist add"
+        else t_fail "T7.1 Whitelist add" "$_WLP not found"; fi
+        typeset _WLC; _WLC=$(grep -c "^${_WLP}$" "$WHITE_LIST" 2>/dev/null | awk '{print $1}')
+        printf "1\n${_WLP}\ny\n" | ksh "$SELF" --whitelsclamav >/dev/null 2>&1
+        if [ "${_WLC:-0}" -eq 1 ]; then t_pass "T7.2 Whitelist no duplicate"
+        else t_fail "T7.2 Whitelist duplicate" "found $_WLC copies"; fi
+        printf "2\n${_WLP}\n" | ksh "$SELF" --whitelsclamav >/dev/null 2>&1
+        if ! grep -q "^${_WLP}$" "$WHITE_LIST" 2>/dev/null; then t_pass "T7.3 Whitelist remove"
+        else t_fail "T7.3 Whitelist remove" "path still present"; fi
+        rm -f "$_WLP"
+
+        t_section "Cron jobs"
+        if crontab -l 2>/dev/null | grep -q "aix_clamav_scan"; then t_pass "T10.1 Daily scan cron present"
+        else t_fail "T10.1 Daily scan cron present" "not found in crontab"; fi
+        if crontab -l 2>/dev/null | grep -q "aix_freshclam"; then t_pass "T10.2 Freshclam cron present"
+        else t_fail "T10.2 Freshclam cron present" "not found in crontab"; fi
+        if crontab -l 2>/dev/null | grep -q "aix_clamav_weekly"; then t_pass "T10.3 Weekly report cron present"
+        else t_fail "T10.3 Weekly report cron present" "not found in crontab"; fi
+
+        t_section "LIBPATH idempotency"
+        set_libpath
+        set_libpath
+        typeset _LC; _LC=$(grep -c "BEGIN ClamAV LIBPATH" "$PROFILE_FILE" 2>/dev/null | awk '{print $1}')
+        [ "${_LC:-0}" -eq 1 ] && t_pass "T11.1 LIBPATH not duplicated" || t_fail "T11.1 LIBPATH not duplicated" "found $_LC blocks"
+    }
+
+    case "$MODE" in
+        --pre)  run_pre ;;
+        --post) run_post ;;
+        --all|*) run_pre; run_post ;;
+    esac
+
+    printf "\n${CYAN}════════════════════════════════════════════════════════════${NC}\n"
+    printf " Results:  ${GREEN}%d passed${NC}  ${RED}%d failed${NC}  ${YELLOW}%d skipped${NC}\n" "$_PASS" "$_FAIL" "$_SKIP"
+    printf "${CYAN}════════════════════════════════════════════════════════════${NC}\n\n"
+
+    if [ "$_FAIL" -gt 0 ]; then
+        printf "Usage: ksh clamav.ksh --runtests [--pre | --post | --all]\n"
+        exit 1
+    fi
+    exit 0
+}
+
+
 # ── Main Dispatcher ───────────────────────────────────────────────────────────
 case "$1" in
     --ver)           print_version ;;
@@ -1218,7 +1357,9 @@ case "$1" in
     --clamavcheck)   clamav_health_check ;;
     --testclamav)    test_clamav_setup ;;
     --scan)          scan_directory "$2" ;;
+    --manualscan)    run_manual_scan ;;
     --whitelsclamav) clamav_whitelist_file ;;
+    --runtests)      run_tests "$2" ;;
     --removeclamav)  uninstall_clamav ;;
     *)
         printf "${RED}Error:${NC} Unknown option: $1\n"
