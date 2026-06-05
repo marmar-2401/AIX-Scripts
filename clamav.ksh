@@ -78,7 +78,7 @@ sed_inplace() {
     typeset _expr="$1"
     typeset _file="$2"
     typeset _tmp
-    _tmp=$(mktemp /tmp/clamav_sed_XXXXXX)
+    _tmp="/tmp/clamav_sed_$$"
     sed "$_expr" "$_file" > "$_tmp" && cp "$_tmp" "$_file"
     rm -f "$_tmp"
 }
@@ -524,7 +524,7 @@ else
 fi
 
 # ── Run scan ──────────────────────────────────────────────────────────────────
-SCAN_TMP=$(mktemp /tmp/clamav_out_XXXXXX)
+SCAN_TMP="/tmp/clamav_out_$$"
 {
     echo "=== ClamAV Scan: $NOW | Type: $TYPE ==="
     nice -n 17 $CLAMSCAN $SCAN_ARGS 2>&1
@@ -682,7 +682,7 @@ RPTEOF
     # ── Substitute email address into all scripts ─────────────────────────
     for SCRIPT in "$SCAN_SCRIPT" "$FRESHCLAM_SCRIPT" "$REPORT_SCRIPT"; do
         typeset TMP_S
-        TMP_S=$(mktemp /tmp/clamav_subs_XXXXXX)
+        TMP_S="/tmp/clamav_subs_$$"
         sed "s|__EMAIL__|${EMAIL_ADDR}|g" "$SCRIPT" > "$TMP_S" && cp "$TMP_S" "$SCRIPT"
         rm -f "$TMP_S"
     done
@@ -698,7 +698,7 @@ RPTEOF
 
     # Build new crontab — remove old clamav entries, append new ones
     typeset TMP_CRON
-    TMP_CRON=$(mktemp /tmp/crontab_XXXXXX)
+    TMP_CRON="/tmp/clamav_cron_$$"
     crontab -l 2>/dev/null | grep -v "aix_clamav_scan\|aix_freshclam\|aix_clamav_weekly" > "$TMP_CRON"
     cat >> "$TMP_CRON" << CRONEOF
 # ClamAV automated jobs — added by clamav.ksh
@@ -1018,7 +1018,7 @@ scan_directory() {
 
     # Capture scan output and exit code cleanly (avoids tee pipe exit code issue)
     typeset SCAN_TMP
-    SCAN_TMP=$(mktemp /tmp/clamav_out_XXXXXX)
+    SCAN_TMP="/tmp/clamav_out_$$"
     "$CLAMSCAN_BIN" -r "$SCAN_DIR" 2>&1 > "$SCAN_TMP"
     typeset SCAN_RC=$?
     cat "$SCAN_TMP" | tee -a "$DATED_LOG"
@@ -1091,7 +1091,7 @@ clamav_whitelist_file() {
 
             echo "$FILE_PATH" >> "$WHITE_LIST"
             typeset TMP_WL
-            TMP_WL=$(mktemp /tmp/whitelist_XXXXXX)
+            TMP_WL="/tmp/clamav_wl_$$"
             sort -u "$WHITE_LIST" > "$TMP_WL" && cp "$TMP_WL" "$WHITE_LIST"
             rm -f "$TMP_WL"
 
@@ -1120,7 +1120,7 @@ clamav_whitelist_file() {
             fi
 
             typeset TMP_WL2
-            TMP_WL2=$(mktemp /tmp/whitelist_XXXXXX)
+            TMP_WL2="/tmp/clamav_wl2_$$"
             grep -vx "$REMOVE_PATH" "$WHITE_LIST" > "$TMP_WL2"
             cp "$TMP_WL2" "$WHITE_LIST"
             rm -f "$TMP_WL2"
@@ -1179,8 +1179,7 @@ uninstall_clamav() {
     kill -9 $(ps -ef | grep '[f]reshclam' | awk '{print $2}') 2>/dev/null || true
 
     print "[+] Removing cron jobs..."
-    typeset TMP_CRON
-    TMP_CRON=$(mktemp /tmp/crontab_XXXXXX)
+    typeset TMP_CRON="/tmp/clamav_cron_remove_$$"
     crontab -l 2>/dev/null | grep -v "aix_clamav\|aix_freshclam\|clamav" > "$TMP_CRON"
     if [ -s "$TMP_CRON" ]; then
         crontab "$TMP_CRON"
@@ -1203,8 +1202,7 @@ uninstall_clamav() {
     printf "${GREEN}[OK] Directories removed.${NC}\n"
 
     print "[+] Removing ClamAV LIBPATH block from ${PROFILE_FILE}..."
-    typeset TMP_PROF
-    TMP_PROF=$(mktemp /tmp/profile_XXXXXX)
+    typeset TMP_PROF="/tmp/clamav_profile_remove_$$"
     awk '
         /# BEGIN ClamAV LIBPATH/ { skip=1; next }
         /# END ClamAV LIBPATH/   { skip=0; next }
@@ -1296,7 +1294,7 @@ run_tests() {
         [ "$_EIRC" -eq 1 ] && t_pass "T5.1 EICAR detected (rc=1)" || t_fail "T5.1 EICAR detected" "rc=$_EIRC want=1"
 
         t_section "Clean scan"
-        typeset _TMPDIR; _TMPDIR=$(mktemp -d /tmp/clamtest_XXXXXX)
+        typeset _TMPDIR; _TMPDIR="/tmp/clamtest_$$"; mkdir -p "$_TMPDIR"
         printf "harmless test file\n" > "$_TMPDIR/clean.txt"
         t_expect_rc "T6.1 Clean scan exits 0" 0 ksh "$SELF" --scan "$_TMPDIR"
         rm -rf "$_TMPDIR"
